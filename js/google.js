@@ -290,6 +290,18 @@ function bytesToBase64(bytes) {
   }
   return btoa(bin);
 }
+// UTF-8 → base64 (for header words and text bodies containing non-ASCII).
+function utf8ToBase64(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+// Wrap a base64 blob to 76-char lines (RFC 2045).
+function wrap76(b64) {
+  return b64.replace(/.{1,76}/g, "$&\r\n").trimEnd();
+}
+// Encode a header value as an RFC 2047 encoded-word only if it has non-ASCII.
+function encodeHeader(value) {
+  return /^[\x00-\x7F]*$/.test(value) ? value : `=?UTF-8?B?${utf8ToBase64(value)}?=`;
+}
 function base64UrlEncode(str) {
   return btoa(unescape(encodeURIComponent(str)))
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -302,24 +314,27 @@ export async function sendGmailWithPdf({ to, subject, body, pdfFileId, pdfName }
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!resp.ok) throw new Error("Could not read the PDF from Drive.");
-  const pdfB64 = bytesToBase64(new Uint8Array(await resp.arrayBuffer()));
+  const pdfB64 = wrap76(bytesToBase64(new Uint8Array(await resp.arrayBuffer())));
 
-  // 2. Build a MIME message with the PDF as an attachment.
+  // 2. Build a MIME message with the PDF as an attachment. Headers are ASCII-
+  //    only (non-ASCII is RFC 2047 encoded); text + PDF parts are base64 so
+  //    the whole message stays 7-bit clean (avoids garbled subjects / spam).
   const boundary = "qmail" + Math.random().toString(36).slice(2);
   const mime = [
-    `To: ${to}`,
-    `Subject: ${subject}`,
+    `To: ${encodeHeader(to)}`,
+    `Subject: ${encodeHeader(subject)}`,
     "MIME-Version: 1.0",
     `Content-Type: multipart/mixed; boundary="${boundary}"`,
     "",
     `--${boundary}`,
     'Content-Type: text/plain; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
     "",
-    body,
+    wrap76(utf8ToBase64(body)),
     "",
     `--${boundary}`,
-    `Content-Type: application/pdf; name="${pdfName}"`,
-    `Content-Disposition: attachment; filename="${pdfName}"`,
+    `Content-Type: application/pdf; name="${encodeHeader(pdfName)}"`,
+    `Content-Disposition: attachment; filename="${encodeHeader(pdfName)}"`,
     "Content-Transfer-Encoding: base64",
     "",
     pdfB64,

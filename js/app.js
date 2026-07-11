@@ -369,7 +369,7 @@ function emailPdfFlow(type, number, records) {
 
   const co = getCompany() || {};
   const kindTitle = type === "invoice" ? "Tax Invoice" : "Quotation";
-  const subject = `${co.name ? co.name + " — " : ""}${kindTitle} ${number}`;
+  const subject = `${co.name ? co.name + " - " : ""}${kindTitle} ${number}`;
   const body =
     `Hi,\n\nPlease find attached ${kindTitle.toLowerCase()} ${number}` +
     `${rec.Client ? " for " + rec.Client : ""}.\n\nKind regards,\n${co.name || ""}`;
