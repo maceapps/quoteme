@@ -101,11 +101,13 @@ code { background: var(--bg); padding: 2px 6px; border-radius: 5px; font-size: 1
 .head-actions { margin-left: auto; display: flex; gap: 8px; }
 h3 { margin: 26px 0 10px; }
 
-/* ---- Stat cards ---- */
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
+/* ---- Stat cards (two rows of three, wide enough for large $ figures) ---- */
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 720px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 460px) { .cards { grid-template-columns: 1fr; } }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
 .stat { padding: 18px 20px; }
-.stat-val { font-size: 26px; font-weight: 700; color: var(--brand); }
+.stat-val { font-size: 24px; font-weight: 700; color: var(--brand); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stat-lbl { font-size: 12px; color: var(--ink-soft); margin-top: 4px; }
 .stat.bad .stat-val { color: var(--bad); }
 .stat.ok .stat-val { color: var(--ok); }
@@ -186,6 +188,7 @@ table.items td { padding: 3px 4px; }
 table.items input { width: 100%; font: inherit; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; }
 table.items input.num { text-align: right; }
 table.items td.num { width: 90px; }
+table.items th.amt, table.items td.amt { width: 180px; }
 .del-item { border: none; background: none; color: var(--bad); cursor: pointer; font-size: 15px; padding: 4px 8px; }
 
 .totals-bar { display: flex; gap: 26px; justify-content: flex-end; align-items: baseline;

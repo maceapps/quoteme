@@ -80,7 +80,7 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
           <thead><tr>
             <th>Description of works / materials</th><th class="num">Qty</th>
             <th class="num">Unit</th><th class="num">Rate (ex GST)</th>
-            <th class="num">Amount (ex GST)</th><th></th>
+            <th class="num amt">Amount (ex GST)</th><th></th>
           </tr></thead>
           <tbody id="items-body"></tbody>
         </table>
@@ -230,7 +230,7 @@ function itemRow(it) {
     <td class="num">${inp("qty", "num")}</td>
     <td class="num">${inp("unit", "num")}</td>
     <td class="num">${inp("rate", "num")}</td>
-    <td class="num">${inp("amount", "num")}</td>
+    <td class="num amt">${inp("amount", "num")}</td>
     <td><button type="button" class="del-item" title="Remove">✕</button></td>`;
   return tr;
 }
