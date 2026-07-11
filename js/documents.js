@@ -41,11 +41,16 @@ export function computeTotals(lineItems) {
   return { subtotal, gst, total: subtotal + gst };
 }
 
-// --- shared building blocks (inline styles for Docs-import fidelity) --------
+// --- shared building blocks ------------------------------------------------
+//  Google Docs' HTML importer ignores most CSS (padding, margins, max-width),
+//  so layout uses the legacy table attributes it DOES honour — cellpadding,
+//  bgcolor, width, align, valign — with inline styles only for text (font
+//  size / colour / weight, which do survive). Tables are borderless; the
+//  line-items table uses a shaded header + zebra striping instead of rules.
 const INK = "#1a2230";
 const BRAND = "#1f3a5f";
 const SOFT = "#55606f";
-const LINE = "#c9ccd2";
+const ZEBRA = "#f1f4f7";
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -53,24 +58,24 @@ function esc(s) {
 
 function letterhead(docTitle, c) {
   return `
-  <table style="width:100%; border-collapse:collapse; margin-bottom:6px;">
+  <table width="100%" border="0" cellspacing="0" cellpadding="0">
     <tr>
-      <td style="vertical-align:top;">
-        <div style="font-size:22px; font-weight:bold; color:${BRAND};">${esc(c.name)}</div>
-        <div style="font-size:11px; color:${INK}; margin-top:6px;">
-          ${esc(c.addressLine1)}<br/>${esc(c.addressLine2)}<br/>
-          Ph. ${esc(c.phone)} &nbsp;·&nbsp; ${esc(c.email)}<br/>
-          ${esc(c.licence)}
-        </div>
+      <td valign="top" style="font-size:11px; color:${INK};">
+        <span style="font-size:22px; font-weight:bold; color:${BRAND};">${esc(c.name)}</span><br/>
+        ${esc(c.addressLine1)}<br/>${esc(c.addressLine2)}<br/>
+        Ph. ${esc(c.phone)} &nbsp;·&nbsp; ${esc(c.email)}<br/>
+        ${esc(c.licence)}
       </td>
-      <td style="vertical-align:top; text-align:right;">
-        <div style="font-size:24px; font-weight:bold; letter-spacing:1px; color:${INK};">${docTitle}</div>
-        <div style="font-size:11px; color:${SOFT}; margin-top:6px;">ABN</div>
-        <div style="font-size:13px; color:${INK};">${esc(c.abn)}</div>
+      <td valign="top" align="right">
+        <span style="font-size:24px; font-weight:bold; color:${INK};">${docTitle}</span><br/>
+        <span style="font-size:11px; color:${SOFT};">ABN</span><br/>
+        <span style="font-size:13px; color:${INK};">${esc(c.abn)}</span>
       </td>
     </tr>
   </table>
-  <hr style="border:none; border-top:2px solid ${BRAND}; margin:4px 0 14px;"/>`;
+  ${spacer()}
+  <hr/>
+  ${spacer()}`;
 }
 
 // Two-column block: "PREPARED FOR / BILL TO"  +  details grid.
@@ -78,53 +83,55 @@ function partiesBlock(leftLabel, client, detailRows) {
   const detail = detailRows
     .map(
       ([k, v]) =>
-        `<tr><td style="font-size:11px; color:${SOFT}; padding:2px 10px 2px 0;">${esc(k)}</td>
+        `<tr><td style="font-size:11px; color:${SOFT};">${esc(k)}</td>
              <td style="font-size:11px; color:${INK};">${esc(v)}</td></tr>`
     )
     .join("");
   return `
-  <table style="width:100%; border-collapse:collapse; margin-bottom:14px;">
+  <table width="100%" border="0" cellspacing="0" cellpadding="0">
     <tr>
-      <td style="width:52%; vertical-align:top;">
-        <div style="font-size:11px; font-weight:bold; color:${BRAND}; letter-spacing:.5px;">${leftLabel}</div>
-        <div style="font-size:12px; color:${INK}; margin-top:4px; line-height:1.5;">
-          <strong>${esc(client.name)}</strong><br/>
+      <td width="54%" valign="top">
+        <span style="font-size:11px; font-weight:bold; color:${BRAND};">${leftLabel}</span><br/><br/>
+        <span style="font-size:12px; color:${INK};"><b>${esc(client.name)}</b><br/>
           ${client.address ? esc(client.address) + "<br/>" : ""}
           ${client.suburb ? esc(client.suburb) + "<br/>" : ""}
           ${client.attn ? "Attn: " + esc(client.attn) + "<br/>" : ""}
-          ${client.phone ? "Ph: " + esc(client.phone) : ""}
-        </div>
+          ${client.phone ? "Ph: " + esc(client.phone) : ""}</span>
       </td>
-      <td style="width:48%; vertical-align:top;">
-        <table style="border-collapse:collapse;">${detail}</table>
+      <td width="46%" valign="top">
+        <table border="0" cellspacing="0" cellpadding="3">${detail}</table>
       </td>
     </tr>
   </table>`;
 }
 
 function lineItemsTable(lineItems) {
-  const th = (t, align = "left") =>
-    `<th style="text-align:${align}; font-size:11px; color:#fff; background:${BRAND}; padding:9px 12px; border:1px solid ${BRAND};">${t}</th>`;
+  const cols = [
+    { w: "46%", a: "left" },   // description
+    { w: "8%",  a: "center" }, // qty
+    { w: "10%", a: "center" }, // unit
+    { w: "18%", a: "right" },  // rate
+    { w: "18%", a: "right" },  // amount
+  ];
+  const headers = ["Description of Works / Materials", "Qty", "Unit", "Rate (ex GST)", "Amount (ex GST)"];
+  const head = headers
+    .map((t, i) => `<td width="${cols[i].w}" align="${cols[i].a}" bgcolor="${BRAND}" style="font-size:11px; color:#ffffff; font-weight:bold;">${t}</td>`)
+    .join("");
   const rows = lineItems
     .filter((it) => it.description || it.amount || it.qty)
-    .map((it) => {
+    .map((it, idx) => {
       const amt = lineAmount(it);
+      const bg = idx % 2 === 1 ? ` bgcolor="${ZEBRA}"` : "";
+      const cell = (val, i) => `<td align="${cols[i].a}"${bg} style="font-size:11px; color:${INK};">${val}</td>`;
       return `<tr>
-        <td style="font-size:11px; padding:9px 12px; border:1px solid ${LINE};">${esc(it.description)}</td>
-        <td style="font-size:11px; padding:9px 12px; border:1px solid ${LINE}; text-align:center;">${esc(it.qty)}</td>
-        <td style="font-size:11px; padding:9px 12px; border:1px solid ${LINE}; text-align:center;">${esc(it.unit)}</td>
-        <td style="font-size:11px; padding:9px 12px; border:1px solid ${LINE}; text-align:right;">${it.rate ? money(it.rate) : ""}</td>
-        <td style="font-size:11px; padding:9px 12px; border:1px solid ${LINE}; text-align:right;">${money(amt)}</td>
+        ${cell(esc(it.description), 0)}${cell(esc(it.qty), 1)}${cell(esc(it.unit), 2)}
+        ${cell(it.rate ? money(it.rate) : "", 3)}${cell(money(amt), 4)}
       </tr>`;
     })
     .join("");
   return `
-  <table style="width:100%; border-collapse:collapse; margin-bottom:12px;">
-    <tr>
-      ${th("Description of Works / Materials")}
-      ${th("Qty", "center")}${th("Unit", "center")}
-      ${th("Rate (ex GST)", "right")}${th("Amount (ex GST)", "right")}
-    </tr>
+  <table width="100%" border="0" cellspacing="0" cellpadding="7">
+    <tr>${head}</tr>
     ${rows}
   </table>`;
 }
@@ -132,22 +139,45 @@ function lineItemsTable(lineItems) {
 function totalsBlock(totals, totalLabel) {
   const row = (k, v, bold) =>
     `<tr>
-       <td style="font-size:${bold ? 13 : 11}px; ${bold ? "font-weight:bold;" : ""} color:${bold ? BRAND : SOFT}; padding:4px 12px 4px 0; text-align:right;">${k}</td>
-       <td style="font-size:${bold ? 13 : 12}px; ${bold ? "font-weight:bold;" : ""} color:${INK}; text-align:right; padding:4px 0;">${v}</td>
+       <td width="68%" align="right" nowrap style="font-size:${bold ? 13 : 11}px; color:${bold ? BRAND : SOFT};${bold ? " font-weight:bold;" : ""}">${k}</td>
+       <td width="32%" align="right" nowrap style="font-size:${bold ? 13 : 12}px; color:${INK};${bold ? " font-weight:bold;" : ""}">${v}</td>
      </tr>`;
   return `
-  <table style="margin-left:auto; border-collapse:collapse; margin-bottom:14px;">
-    ${row("Subtotal (ex GST)", money(totals.subtotal))}
-    ${row(`GST (${Math.round(GST_RATE * 100)}%)`, money(totals.gst))}
-    ${row(totalLabel, money(totals.total), true)}
+  <table width="100%" border="0" cellspacing="0" cellpadding="0">
+    <tr>
+      <td width="40%"></td>
+      <td width="60%">
+        <table width="100%" border="0" cellspacing="0" cellpadding="5">
+          ${row("Subtotal (ex GST)", money(totals.subtotal))}
+          ${row(`GST (${Math.round(GST_RATE * 100)}%)`, money(totals.gst))}
+          ${row(totalLabel, money(totals.total), true)}
+        </table>
+      </td>
+    </tr>
   </table>`;
 }
 
 function sectionTitle(t) {
-  return `<div style="font-size:11px; font-weight:bold; color:${BRAND}; letter-spacing:.5px; margin:10px 0 4px;">${t}</div>`;
+  return `<p style="font-size:11px; font-weight:bold; color:${BRAND}; margin:0;">${t}</p>`;
 }
 function para(t) {
-  return `<div style="font-size:11px; color:${INK}; line-height:1.5; margin-bottom:8px;">${esc(t)}</div>`;
+  return `<p style="font-size:11px; color:${INK}; margin:0;">${esc(t)}</p>`;
+}
+// An empty paragraph — a reliable way to add vertical space in a Google Doc.
+function spacer() {
+  return `<p style="margin:0;">&nbsp;</p>`;
+}
+// Bank details, each on its own line, left justified.
+function paymentDetails(company, reference) {
+  const b = company.bank || {};
+  const line = (k, v) => `<p style="font-size:11px; color:${INK}; margin:0;">${k}: ${esc(v)}</p>`;
+  return (
+    line("Bank", b.bankName) +
+    line("Account Name", b.accountName) +
+    line("BSB", b.bsb) +
+    line("Account Number", b.account) +
+    line("Reference", reference)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -165,13 +195,17 @@ function buildQuoteHtml(d, company) {
       ["Est. Start", d.estStart || "—"],
     ])}
     ${para(`JOB / SITE ADDRESS:  ${d.jobSite || ""}`)}
+    ${spacer()}
     ${sectionTitle("SCOPE OF WORKS")}${para(d.scope)}
+    ${spacer()}
     ${lineItemsTable(d.lineItems)}
+    ${totalsBlock(totals, "QUOTE TOTAL (inc GST)")}
+    ${spacer()}
     ${sectionTitle("INCLUSIONS / EXCLUSIONS")}
     ${para(`Includes:  ${d.includes || ""}`)}
     ${para(`Excludes:  ${d.excludes || ""}`)}
     ${para(`Deposit:  ${d.deposit || ""}`)}
-    ${totalsBlock(totals, "QUOTE TOTAL (inc GST)")}
+    ${spacer()}
     ${sectionTitle("TERMS & CONDITIONS")}
     <ul style="font-size:10px; color:${SOFT}; line-height:1.5;">
       <li>This quotation is valid until the date shown above and is subject to site inspection and availability of materials.</li>
@@ -179,8 +213,11 @@ function buildQuoteHtml(d, company) {
       <li>Variations to the agreed scope will be quoted separately and confirmed in writing before works proceed.</li>
       <li>A deposit is required to secure your booking. Progress payments apply as per the agreed payment schedule.</li>
     </ul>
+    ${spacer()}
     ${sectionTitle("ACCEPTANCE OF QUOTATION")}
     ${para("By signing below, I/we accept this quotation and authorise the works described above to proceed on these terms.")}
+    ${spacer()}
+    ${spacer()}
     ${signatureBlock()}
   `);
 }
@@ -190,7 +227,6 @@ function buildQuoteHtml(d, company) {
 // ---------------------------------------------------------------------------
 function buildInvoiceHtml(d, company) {
   const totals = computeTotals(d.lineItems);
-  const b = company.bank || {};
   return wrap(`
     ${letterhead("TAX INVOICE", company)}
     ${partiesBlock("BILL TO", d.client, [
@@ -200,10 +236,13 @@ function buildInvoiceHtml(d, company) {
       ["Quote Ref.", d.quoteRef || "—"],
     ])}
     ${para(`JOB / SITE ADDRESS:  ${d.jobSite || ""}`)}
+    ${spacer()}
     ${lineItemsTable(d.lineItems)}
-    ${sectionTitle("PAYMENT DETAILS")}
-    ${para(`Bank: ${b.bankName}    Account Name: ${b.accountName}    BSB: ${b.bsb}    Acc: ${b.account}    Reference: ${d.number}`)}
     ${totalsBlock(totals, "TOTAL DUE (inc GST)")}
+    ${spacer()}
+    ${sectionTitle("PAYMENT DETAILS")}
+    ${paymentDetails(company, d.number)}
+    ${spacer()}
     ${sectionTitle("PAYMENT TERMS & NOTES")}
     <ul style="font-size:10px; color:${SOFT}; line-height:1.5;">
       <li>Payment is due by the due date shown above. Please use the invoice number as the payment reference.</li>
@@ -216,17 +255,21 @@ function buildInvoiceHtml(d, company) {
 }
 
 function signatureBlock() {
-  const cell = (label) =>
-    `<td style="width:33%; vertical-align:bottom; padding:26px 10px 0;">
-       <div style="border-top:1px solid ${LINE}; padding-top:3px; font-size:10px; color:${SOFT};">${label}</div>
-     </td>`;
-  return `<table style="width:100%; border-collapse:collapse; margin-top:8px;"><tr>
-    ${cell("Signature")}${cell("Name (please print)")}${cell("Date")}</tr></table>`;
+  const cell = (label, line) =>
+    `<td width="33%" valign="bottom" nowrap style="font-size:11px; color:${INK};">${label}: ${line}</td>`;
+  return `
+  <table width="100%" border="0" cellspacing="0" cellpadding="6">
+    <tr>
+      ${cell("Signature", "____________________")}
+      ${cell("Name", "__________________")}
+      ${cell("Date", "____________")}
+    </tr>
+  </table>`;
 }
 
 function wrap(inner) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"/></head>
-  <body style="font-family:Arial, sans-serif; color:${INK}; max-width:720px; margin:0 auto; padding:24px;">
+  <body style="font-family:Arial, sans-serif; color:${INK};">
   ${inner}
   </body></html>`;
 }
