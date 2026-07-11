@@ -13,8 +13,9 @@ export const GOOGLE_CLIENT_ID = "776867477364-l5qu3f1gik5e8p95r1iv5ln8h18gtjhj.a
 //                headaches, and it never touches the rest of your Drive).
 //  spreadsheets = read/write the register sheet the app creates.
 export const GOOGLE_SCOPES = [
+  // drive.file also authorises the Sheets API for spreadsheets the app itself
+  // created, so no broad "spreadsheets" scope is needed.
   "https://www.googleapis.com/auth/drive.file",
-  "https://www.googleapis.com/auth/spreadsheets",
   "https://www.googleapis.com/auth/gmail.send",   // send invoices/quotes from your Gmail
 ].join(" ");
 

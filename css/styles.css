@@ -187,6 +187,9 @@ table.items th.num { text-align: right; }
 table.items td { padding: 3px 4px; }
 table.items input { width: 100%; font: inherit; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; }
 table.items input.num { text-align: right; }
+table.items input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+table.items input[type="number"]::-webkit-inner-spin-button,
+table.items input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 table.items td.num { width: 90px; }
 table.items th.amt, table.items td.amt { width: 180px; }
 .del-item { border: none; background: none; color: var(--bad); cursor: pointer; font-size: 15px; padding: 4px 8px; }

@@ -2,7 +2,7 @@
 //  app.js — bootstrap, sign-in, view switching, and the register views.
 // ============================================================================
 import { GOOGLE_CLIENT_ID } from "./config.js";
-import { initGoogle, signIn, signOut, getUserInfo, BUSINESS_FIELDS } from "./google.js";
+import { initGoogle, signIn, signOut, getUserInfo, restoreToken, BUSINESS_FIELDS } from "./google.js";
 import {
   initStore, listQuotes, listInvoices,
   markQuoteConverted, setQuoteStatus, setInvoiceStatus, deleteDocument,
@@ -38,19 +38,38 @@ function setSignedInUI(signedIn) {
 }
 
 // --- sign-in ---------------------------------------------------------------
+// Shared path once we hold a valid token (from a click or a restored session).
+async function enterApp() {
+  state.user = await getUserInfo();
+  setSignedInUI(true);
+  el("view-dashboard").innerHTML = `<p class="muted">Setting up your Drive folder and register…</p>`;
+  show("dashboard");
+  await initStore();
+  applyBranding();
+  renderDashboard();
+}
+
 async function handleSignIn() {
   try {
     await signIn();
-    state.user = await getUserInfo();
-    setSignedInUI(true);
-    el("view-dashboard").innerHTML = `<p class="muted">Setting up your Drive folder and register…</p>`;
-    show("dashboard");
-    await initStore();
-    applyBranding();
-    renderDashboard();
+    await enterApp();
   } catch (err) {
     console.error(err);
     alert("Sign-in failed: " + (err.message || err.error || "unknown error"));
+  }
+}
+
+// On load, silently resume if a saved token is still valid — no click needed.
+async function tryAutoSignIn() {
+  if (!restoreToken()) return false;
+  try {
+    await enterApp();
+    return true;
+  } catch (e) {
+    console.warn("Saved session no longer valid, showing sign-in.", e);
+    signOut();
+    setSignedInUI(false);
+    return false;
   }
 }
 
@@ -573,7 +592,9 @@ async function boot() {
     });
   });
 
-  show("welcome");
+  // Silently resume a saved session if the token is still valid; else land page.
+  const resumed = !GOOGLE_CLIENT_ID.startsWith("PASTE_") && (await tryAutoSignIn());
+  if (!resumed) show("welcome");
 }
 
 boot();

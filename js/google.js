@@ -16,6 +16,35 @@ let tokenClient = null;
 let gapiReady = false;
 let accessToken = null;
 
+// Persist the short-lived access token so page reloads within its ~1h life
+// resume silently (no click, no popup). Cleared on sign-out / expiry.
+const TOKEN_KEY = "qm_token";
+function saveToken(resp) {
+  accessToken = resp.access_token;
+  gapi.client.setToken({ access_token: accessToken });
+  const expiry = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
+  try { localStorage.setItem(TOKEN_KEY, JSON.stringify({ access_token: accessToken, expiry })); } catch {}
+}
+function clearToken() {
+  accessToken = null;
+  try { localStorage.removeItem(TOKEN_KEY); } catch {}
+  if (gapiReady) gapi.client.setToken(null);
+}
+
+// Restore a still-valid saved token (call after initGoogle). Returns true if a
+// usable token was restored. Keeps a 60s safety margin before expiry.
+export function restoreToken() {
+  try {
+    const raw = localStorage.getItem(TOKEN_KEY);
+    if (!raw) return false;
+    const { access_token, expiry } = JSON.parse(raw);
+    if (!access_token || Date.now() > expiry - 60000) { clearToken(); return false; }
+    accessToken = access_token;
+    gapi.client.setToken({ access_token: accessToken });
+    return true;
+  } catch { return false; }
+}
+
 // --- small helper: wait until a global (gapi / google) has loaded ----------
 function waitFor(check, label) {
   return new Promise((resolve, reject) => {
@@ -56,21 +85,22 @@ export function signIn() {
     if (!tokenClient) return reject(new Error("Google not initialised"));
     tokenClient.callback = (resp) => {
       if (resp.error) return reject(resp);
-      accessToken = resp.access_token;
-      gapi.client.setToken({ access_token: accessToken });
+      saveToken(resp);
       resolve(resp);
     };
-    // prompt: '' → silent if already consented this session, else shows chooser
-    tokenClient.requestAccessToken({ prompt: accessToken ? "" : "consent" });
+    // prompt: '' → Google shows the consent screen only the first time you
+    // grant access; on later loads it returns a token silently (no approval
+    // screen, no "unverified app" warning). Passing "consent" here would force
+    // the approval screen on every load.
+    tokenClient.requestAccessToken({ prompt: "" });
   });
 }
 
 export function signOut() {
   if (accessToken) {
     google.accounts.oauth2.revoke(accessToken, () => {});
-    accessToken = null;
-    gapi.client.setToken(null);
   }
+  clearToken();
 }
 
 // --- fetch the signed-in user's basic profile (name/email) -----------------

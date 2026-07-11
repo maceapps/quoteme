@@ -223,14 +223,16 @@ function collectData(container, type, lineItems) {
 function blankItem() { return { description: "", qty: "", unit: "", rate: "", amount: "" }; }
 function itemRow(it) {
   const tr = document.createElement("tr");
-  const inp = (k, cls = "") =>
-    `<input data-k="${k}" class="${cls}" value="${escAttr(it[k])}"/>`;
+  const inp = (k, cls = "", type = "text") => {
+    const numAttrs = type === "number" ? ' inputmode="decimal" step="any" min="0"' : "";
+    return `<input data-k="${k}" class="${cls}" type="${type}"${numAttrs} value="${escAttr(it[k])}"/>`;
+  };
   tr.innerHTML = `
     <td>${inp("description")}</td>
-    <td class="num">${inp("qty", "num")}</td>
+    <td class="num">${inp("qty", "num", "number")}</td>
     <td class="num">${inp("unit", "num")}</td>
-    <td class="num">${inp("rate", "num")}</td>
-    <td class="num amt">${inp("amount", "num")}</td>
+    <td class="num">${inp("rate", "num", "number")}</td>
+    <td class="num amt">${inp("amount", "num", "number")}</td>
     <td><button type="button" class="del-item" title="Remove">✕</button></td>`;
   return tr;
 }
