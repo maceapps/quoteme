@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# Private business reference files — keep these out of the public repo
+# (they contain real bank details, licence numbers, etc.)
+Invoice_and_Quote_Tracker.xlsx
+Quotation_Template.docx
+Tax_Invoice_Template.docx
+*.xlsx
+*.docx

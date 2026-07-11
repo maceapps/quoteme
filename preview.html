@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en-AU">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QuoteMe — document preview</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #eceef1; color: #1a2230; }
+    header { background: #1f3a5f; color: #fff; padding: 14px 22px; }
+    header h1 { margin: 0; font-size: 17px; }
+    header p { margin: 4px 0 0; font-size: 13px; opacity: .85; }
+    .toolbar { padding: 12px 22px; display: flex; gap: 8px; }
+    .toolbar button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid #cbd0d8;
+      background: #fff; cursor: pointer; font-weight: 600; }
+    .toolbar button.active { background: #1f3a5f; color: #fff; border-color: #1f3a5f; }
+    .stage { display: flex; justify-content: center; padding: 0 22px 40px; }
+    iframe { width: 794px; max-width: 100%; height: 1123px; background: #fff; border: none;
+      box-shadow: 0 8px 30px rgba(20,30,50,.18); }
+    .note { max-width: 794px; margin: 0 auto 12px; font-size: 13px; color: #55606f; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Document preview</h1>
+    <p>This is exactly what the app uploads to Drive as a Google Doc and exports as a PDF. No sign-in needed.</p>
+  </header>
+  <div class="toolbar">
+    <button id="btn-quote" class="active">Quotation</button>
+    <button id="btn-invoice">Tax Invoice</button>
+  </div>
+  <p class="note">Using sample data. In the live app your letterhead/bank details come from the
+     "Business Details" tab of your register sheet in Google Drive.</p>
+  <div class="stage"><iframe id="frame" title="preview"></iframe></div>
+
+  <script type="module">
+    import { buildDocumentHtml } from "./js/documents.js";
+
+    // Generic sample company (real details live in your Drive, not here).
+    const sampleCompany = {
+      name: "ABC Constructions", slogan: "Quality building services",
+      addressLine1: "12 Example Street", addressLine2: "Suburb, State, 0000",
+      phone: "0400 000 000", email: "name@example.com",
+      licence: "NSW 00000c · ACT 00000000", abn: "00 000 000 000",
+      bank: { bankName: "ANZ", accountName: "ABC Constructions", bsb: "000-000", account: "000 000 000" },
+    };
+
+    const sampleQuote = {
+      type: "quote", number: "QTE-0004",
+      client: { name: "Thompson Residence", attn: "J. Thompson",
+                address: "12 Oak St", suburb: "Ainslie, ACT, 2602", phone: "0400 123 456" },
+      jobSite: "12 Oak St, Ainslie",
+      dateIssued: "2026-07-11", validUntil: "2026-08-10",
+      preparedBy: "Con Kas", estStart: "Late July",
+      scope: "Supply of labour and materials to construct a rear timber deck including footings, bearers, joists, decking boards and balustrade, as per site measure.",
+      lineItems: [
+        { description: "Site preparation & set-out", qty: "1", unit: "job", rate: "650", amount: "650" },
+        { description: "Footings & subframe", qty: "1", unit: "job", rate: "3200", amount: "3200" },
+        { description: "Merbau decking – supply & lay", qty: "42", unit: "m²", rate: "95", amount: "3990" },
+        { description: "Balustrade & steps", qty: "1", unit: "job", rate: "660", amount: "660" },
+      ],
+      includes: "All materials, labour, and site clean-up.",
+      excludes: "Electrical, landscaping, council fees.",
+      deposit: "10% on acceptance",
+    };
+
+    const sampleInvoice = {
+      ...sampleQuote, type: "invoice", number: "INV-0004",
+      issueDate: "2026-07-11", dueDate: "2026-07-25", quoteRef: "QTE-0004",
+    };
+
+    const frame = document.getElementById("frame");
+    function render(data) {
+      frame.srcdoc = buildDocumentHtml(data, sampleCompany);
+    }
+    const bq = document.getElementById("btn-quote");
+    const bi = document.getElementById("btn-invoice");
+    bq.onclick = () => { bq.classList.add("active"); bi.classList.remove("active"); render(sampleQuote); };
+    bi.onclick = () => { bi.classList.add("active"); bq.classList.remove("active"); render(sampleInvoice); };
+    render(sampleQuote);
+  </script>
+</body>
+</html>

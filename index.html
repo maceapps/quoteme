@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en-AU">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QuoteMe</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">▚</span>
+      <div>
+        <div class="brand-name" id="brand-name">QuoteMe</div>
+        <div class="brand-sub">Quotes &amp; Invoices</div>
+      </div>
+    </div>
+    <nav class="tabs" id="tabs" hidden>
+      <button data-view="dashboard" class="tab is-active">Dashboard</button>
+      <button data-view="quotes">Quotes</button>
+      <button data-view="invoices">Invoices</button>
+    </nav>
+    <div class="auth" id="auth">
+      <span class="user" id="user-label"></span>
+      <button id="signin-btn" class="btn btn-primary">Sign in with Google</button>
+      <button id="signout-btn" class="btn btn-ghost" hidden>Sign out</button>
+    </div>
+  </header>
+
+  <main id="app">
+    <!-- Signed-out landing -->
+    <section id="view-welcome" class="view">
+      <div class="welcome-card">
+        <h1>QuoteMe</h1>
+        <p>Create professional quotes and tax invoices, save them straight to your
+           Google Drive, and keep your register up to date automatically.</p>
+        <p class="muted" id="config-warning" hidden>
+          ⚠️ Google Client ID not set yet — add it in <code>js/config.js</code>.
+        </p>
+        <button id="welcome-signin" class="btn btn-primary btn-lg">Sign in with Google to start</button>
+      </div>
+    </section>
+
+    <!-- Placeholder views wired up in later steps -->
+    <section id="view-dashboard" class="view" hidden></section>
+    <section id="view-quotes" class="view" hidden></section>
+    <section id="view-invoices" class="view" hidden></section>
+  </main>
+
+  <!-- Google Identity Services (token client) -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <!-- Google API client (Drive + Sheets) -->
+  <script src="https://apis.google.com/js/api.js" async defer></script>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
