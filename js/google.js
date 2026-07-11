@@ -279,6 +279,15 @@ export async function trashFile(fileId) {
   await gapi.client.drive.files.update({ fileId, resource: { trashed: true } });
 }
 
+// Fetch a Drive file's bytes as a Blob (for downloading to the device).
+export async function fetchDriveFile(fileId) {
+  const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok) throw new Error("Could not download the file from Drive.");
+  return resp.blob();
+}
+
 // ---------------------------------------------------------------------------
 //  GMAIL  (send a document's PDF as an attachment from the signed-in account)
 // ---------------------------------------------------------------------------

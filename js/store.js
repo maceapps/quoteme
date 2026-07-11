@@ -11,7 +11,7 @@ import {
   ensureFolder, ensureRegisterSheet,
   uploadHtmlAsDoc, exportDocAsPdf,
   appendRow, readRows, updateValues,
-  getSheetId, deleteSheetRow, trashFile,
+  getSheetId, deleteSheetRow, trashFile, fetchDriveFile,
   ensureBusinessSheet, readBusinessDetails, writeBusinessDetails, BUSINESS_TAB,
   sendGmailWithPdf,
 } from "./google.js";
@@ -220,6 +220,13 @@ export async function emailPdf({ to, subject, body, pdfLink, pdfName }) {
   const id = fileIdFromLink(pdfLink);
   if (!id) throw new Error("No PDF is attached to this document.");
   return sendGmailWithPdf({ to, subject, body, pdfFileId: id, pdfName });
+}
+
+// Fetch a document's PDF as a Blob (for downloading to the device).
+export async function fetchPdfBlob(pdfLink) {
+  const id = fileIdFromLink(pdfLink);
+  if (!id) throw new Error("No PDF is attached to this document.");
+  return fetchDriveFile(id);
 }
 
 // Delete a quote/invoice: trash its Doc + PDF and remove its register row.

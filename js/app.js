@@ -7,7 +7,7 @@ import {
   initStore, listQuotes, listInvoices,
   markQuoteConverted, setQuoteStatus, setInvoiceStatus, deleteDocument,
   getCompany, businessDetailsComplete, businessSheetUrl, refreshCompany, saveBusinessDetails,
-  emailPdf,
+  emailPdf, fetchPdfBlob,
 } from "./store.js";
 import { renderForm } from "./forms.js";
 import { money } from "./documents.js";
@@ -191,6 +191,9 @@ async function renderQuotes() {
     })
   );
   wireDelete(c, "quote", renderQuotes);
+  c.querySelectorAll("[data-download]").forEach((b) =>
+    b.addEventListener("click", () => downloadPdfFlow("quote", b.dataset.download, quotes))
+  );
   c.querySelectorAll("[data-email]").forEach((b) =>
     b.addEventListener("click", () => emailPdfFlow("quote", b.dataset.email, quotes))
   );
@@ -248,6 +251,9 @@ async function renderInvoices() {
       renderInvoices();
     })
   );
+  c.querySelectorAll("[data-download]").forEach((b) =>
+    b.addEventListener("click", () => downloadPdfFlow("invoice", b.dataset.download, invoices))
+  );
   c.querySelectorAll("[data-email]").forEach((b) =>
     b.addEventListener("click", () => emailPdfFlow("invoice", b.dataset.email, invoices))
   );
@@ -296,6 +302,7 @@ function actionsMenu(rec, type) {
   const items = [];
   if (rec.DocLink) items.push(`<a href="${rec.DocLink}" target="_blank">Open Doc</a>`);
   if (rec.PdfLink) items.push(`<a href="${rec.PdfLink}" target="_blank">Open PDF</a>`);
+  if (rec.PdfLink) items.push(`<button data-download="${no}">Download PDF</button>`);
   if (rec.PdfLink) items.push(`<button data-email="${no}">Email PDF…</button>`);
   items.push(`<button data-edit="${no}">Edit</button>`);
   if (type === "quote") {
@@ -359,6 +366,27 @@ async function convertQuote(quoteNumber, quotes) {
     prefill,
     afterSave: async (res) => { await markQuoteConverted(quoteNumber, res.number); },
   });
+}
+
+// --- download a PDF --------------------------------------------------------
+async function downloadPdfFlow(type, number, records) {
+  const key = type === "invoice" ? "Invoice No." : "Quote No.";
+  const rec = records.find((r) => r[key] === number);
+  if (!rec || !rec.PdfLink) { alert("No PDF found for this document."); return; }
+  try {
+    const blob = await fetchPdfBlob(rec.PdfLink);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${number}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (err) {
+    console.error(err);
+    alert("Download failed: " + (err.message || "unknown error"));
+  }
 }
 
 // --- email a PDF -----------------------------------------------------------
