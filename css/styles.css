@@ -115,6 +115,7 @@ table.list { width: 100%; border-collapse: collapse; background: var(--card);
   border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
 table.list th { text-align: left; font-size: 12px; color: var(--ink-soft); font-weight: 600;
   padding: 10px 12px; background: var(--bg); border-bottom: 1px solid var(--line); }
+table.list { overflow: visible; }
 table.list td { padding: 10px 12px; font-size: 13px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 table.list tr:last-child td { border-bottom: none; }
 table.list .num, td.num, th.num { text-align: right; }
@@ -128,6 +129,31 @@ tr.row-flash > td { animation: rowflash 2s ease; }
 .btn.small { padding: 5px 10px; font-size: 12px; font-weight: 600; }
 .btn.small.danger { color: var(--bad); border-color: #f0cfca; }
 .btn.small.danger:hover { background: #fbe7e4; }
+
+/* ---- Row actions dropdown ---- */
+.actions-menu { position: relative; display: inline-block; }
+.actions-menu > summary { list-style: none; cursor: pointer; user-select: none; }
+.actions-menu > summary::-webkit-details-marker { display: none; }
+.actions-menu .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 30;
+  min-width: 176px; background: var(--card); border: 1px solid var(--line);
+  border-radius: 10px; box-shadow: var(--shadow); padding: 6px; }
+.actions-menu .menu a,
+.actions-menu .menu button { display: block; width: 100%; text-align: left; box-sizing: border-box;
+  border: none; background: none; font: inherit; font-size: 13px; color: var(--ink);
+  padding: 8px 12px; border-radius: 7px; cursor: pointer; text-decoration: none; }
+.actions-menu .menu a:hover,
+.actions-menu .menu button:hover { background: var(--bg); }
+.actions-menu .menu button.danger { color: var(--bad); }
+.actions-menu .menu .menu-note { display: block; padding: 8px 12px; font-size: 12px; color: var(--ink-soft); }
+
+/* ---- Modal (email PDF) ---- */
+.modal-overlay { position: fixed; inset: 0; background: rgba(20,30,50,.45); z-index: 100;
+  display: flex; align-items: center; justify-content: center; padding: 20px; }
+.modal { background: var(--card); border-radius: var(--radius); box-shadow: 0 20px 60px rgba(20,30,50,.35);
+  padding: 24px; width: min(480px, 94vw); }
+.modal h3 { margin: 0 0 16px; color: var(--brand); }
+.modal .f { margin-bottom: 12px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 6px; }
 
 /* ---- Status pills / selects ---- */
 .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;

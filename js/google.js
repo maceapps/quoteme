@@ -280,6 +280,72 @@ export async function trashFile(fileId) {
 }
 
 // ---------------------------------------------------------------------------
+//  GMAIL  (send a document's PDF as an attachment from the signed-in account)
+// ---------------------------------------------------------------------------
+function bytesToBase64(bytes) {
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+function base64UrlEncode(str) {
+  return btoa(unescape(encodeURIComponent(str)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// Email a PDF (already in Drive) to `to`, sent from the signed-in Gmail account.
+export async function sendGmailWithPdf({ to, subject, body, pdfFileId, pdfName }) {
+  // 1. Pull the PDF bytes from Drive.
+  const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${pdfFileId}?alt=media`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok) throw new Error("Could not read the PDF from Drive.");
+  const pdfB64 = bytesToBase64(new Uint8Array(await resp.arrayBuffer()));
+
+  // 2. Build a MIME message with the PDF as an attachment.
+  const boundary = "qmail" + Math.random().toString(36).slice(2);
+  const mime = [
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    "",
+    body,
+    "",
+    `--${boundary}`,
+    `Content-Type: application/pdf; name="${pdfName}"`,
+    `Content-Disposition: attachment; filename="${pdfName}"`,
+    "Content-Transfer-Encoding: base64",
+    "",
+    pdfB64,
+    `--${boundary}--`,
+  ].join("\r\n");
+
+  // 3. Send via the Gmail API.
+  const send = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ raw: base64UrlEncode(mime) }),
+  });
+  if (!send.ok) {
+    const text = await send.text();
+    if (send.status === 401 || (send.status === 403 && /insufficient|scope|permission/i.test(text))) {
+      throw new Error("Gmail permission not granted yet — sign out and sign in again to allow sending email.");
+    }
+    if (send.status === 403 && /has not been used|disabled|SERVICE_DISABLED/i.test(text)) {
+      throw new Error("Gmail API isn't enabled for this project yet — enable it in Google Cloud Console, then try again.");
+    }
+    throw new Error("Gmail send failed: " + text);
+  }
+  return send.json();
+}
+
+// ---------------------------------------------------------------------------
 //  BUSINESS DETAILS  (a "Business Details" tab in the register spreadsheet;
 //  the source of truth for the company info stamped on every document, kept
 //  out of the code so nothing business-specific lives in the repo.)

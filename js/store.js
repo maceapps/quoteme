@@ -13,6 +13,7 @@ import {
   appendRow, readRows, updateValues,
   getSheetId, deleteSheetRow, trashFile,
   ensureBusinessSheet, readBusinessDetails, writeBusinessDetails, BUSINESS_TAB,
+  sendGmailWithPdf,
 } from "./google.js";
 import { buildDocumentHtml, computeTotals } from "./documents.js";
 
@@ -212,6 +213,13 @@ export async function setInvoiceStatus(invoiceNumber, status, { datePaid = "", r
 function fileIdFromLink(link) {
   const m = /\/d\/([-\w]+)/.exec(link || "");
   return m ? m[1] : null;
+}
+
+// Email a document's PDF from the signed-in Gmail account.
+export async function emailPdf({ to, subject, body, pdfLink, pdfName }) {
+  const id = fileIdFromLink(pdfLink);
+  if (!id) throw new Error("No PDF is attached to this document.");
+  return sendGmailWithPdf({ to, subject, body, pdfFileId: id, pdfName });
 }
 
 // Delete a quote/invoice: trash its Doc + PDF and remove its register row.

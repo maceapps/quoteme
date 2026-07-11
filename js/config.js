@@ -15,6 +15,7 @@ export const GOOGLE_CLIENT_ID = "776867477364-l5qu3f1gik5e8p95r1iv5ln8h18gtjhj.a
 export const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/drive.file",
   "https://www.googleapis.com/auth/spreadsheets",
+  "https://www.googleapis.com/auth/gmail.send",   // send invoices/quotes from your Gmail
 ].join(" ");
 
 // --- 3. Your company details -----------------------------------------------

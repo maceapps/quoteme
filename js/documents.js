@@ -104,17 +104,17 @@ function partiesBlock(leftLabel, client, detailRows) {
 
 function lineItemsTable(lineItems) {
   const th = (t, align = "left") =>
-    `<th style="text-align:${align}; font-size:11px; color:#fff; background:${BRAND}; padding:7px 8px; border:1px solid ${BRAND};">${t}</th>`;
+    `<th style="text-align:${align}; font-size:11px; color:#fff; background:${BRAND}; padding:9px 12px; border:1px solid ${BRAND};">${t}</th>`;
   const rows = lineItems
     .filter((it) => it.description || it.amount || it.qty)
     .map((it) => {
       const amt = lineAmount(it);
       return `<tr>
-        <td style="font-size:11px; padding:6px 8px; border:1px solid ${LINE};">${esc(it.description)}</td>
-        <td style="font-size:11px; padding:6px 8px; border:1px solid ${LINE}; text-align:center;">${esc(it.qty)}</td>
-        <td style="font-size:11px; padding:6px 8px; border:1px solid ${LINE}; text-align:center;">${esc(it.unit)}</td>
-        <td style="font-size:11px; padding:6px 8px; border:1px solid ${LINE}; text-align:right;">${it.rate ? money(it.rate) : ""}</td>
-        <td style="font-size:11px; padding:6px 8px; border:1px solid ${LINE}; text-align:right;">${money(amt)}</td>
+        <td style="font-size:11px; padding:9px 12px; border:1px solid ${LINE};">${esc(it.description)}</td>
+        <td style="font-size:11px; padding:9px 12px; border:1px solid ${LINE}; text-align:center;">${esc(it.qty)}</td>
+        <td style="font-size:11px; padding:9px 12px; border:1px solid ${LINE}; text-align:center;">${esc(it.unit)}</td>
+        <td style="font-size:11px; padding:9px 12px; border:1px solid ${LINE}; text-align:right;">${it.rate ? money(it.rate) : ""}</td>
+        <td style="font-size:11px; padding:9px 12px; border:1px solid ${LINE}; text-align:right;">${money(amt)}</td>
       </tr>`;
     })
     .join("");

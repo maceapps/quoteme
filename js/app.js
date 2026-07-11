@@ -7,6 +7,7 @@ import {
   initStore, listQuotes, listInvoices,
   markQuoteConverted, setQuoteStatus, setInvoiceStatus, deleteDocument,
   getCompany, businessDetailsComplete, businessSheetUrl, refreshCompany, saveBusinessDetails,
+  emailPdf,
 } from "./store.js";
 import { renderForm } from "./forms.js";
 import { money } from "./documents.js";
@@ -190,6 +191,10 @@ async function renderQuotes() {
     })
   );
   wireDelete(c, "quote", renderQuotes);
+  c.querySelectorAll("[data-email]").forEach((b) =>
+    b.addEventListener("click", () => emailPdfFlow("quote", b.dataset.email, quotes))
+  );
+  wireMenuClose(c);
   applyHighlight(c);
 }
 
@@ -204,14 +209,7 @@ function quoteRow(q) {
     <td class="num">${money(q["Total (inc GST)"])}</td>
     <td>${q["Valid Until"] || ""}</td>
     <td>${converted ? statusPill("Accepted") : statusSelect(no, q.Status, ["Pending", "Accepted", "Declined"], "qstatus")}</td>
-    <td class="row-actions">
-      ${docLinks(q)}
-      <button class="btn btn-ghost small" data-edit="${no}">Edit</button>
-      ${converted
-        ? `<span class="muted small">→ ${converted}</span>`
-        : `<button class="btn btn-ghost small" data-convert="${no}">Convert to invoice</button>`}
-      <button class="btn btn-ghost small danger" data-del="${no}">Delete</button>
-    </td>
+    <td class="row-actions">${actionsMenu(q, "quote")}</td>
   </tr>`;
 }
 
@@ -250,6 +248,10 @@ async function renderInvoices() {
       renderInvoices();
     })
   );
+  c.querySelectorAll("[data-email]").forEach((b) =>
+    b.addEventListener("click", () => emailPdfFlow("invoice", b.dataset.email, invoices))
+  );
+  wireMenuClose(c);
   applyHighlight(c);
 }
 
@@ -263,11 +265,7 @@ function invoiceRow(i) {
     <td class="num">${money(i["Total (inc GST)"])}</td>
     <td>${i["Due Date"] || ""}</td>
     <td>${statusSelect(no, i.Status, ["Unpaid", "Paid", "Overdue"], "istatus", i["Total (inc GST)"])}</td>
-    <td class="row-actions">
-      ${docLinks(i)}
-      <button class="btn btn-ghost small" data-edit="${no}">Edit</button>
-      <button class="btn btn-ghost small danger" data-del="${no}">Delete</button>
-    </td>
+    <td class="row-actions">${actionsMenu(i, "invoice")}</td>
   </tr>`;
 }
 
@@ -291,11 +289,36 @@ function wireDelete(container, type, rerender) {
 }
 
 // --- shared UI bits --------------------------------------------------------
-function docLinks(r) {
-  const a = [];
-  if (r.DocLink) a.push(`<a class="small" href="${r.DocLink}" target="_blank">Doc</a>`);
-  if (r.PdfLink) a.push(`<a class="small" href="${r.PdfLink}" target="_blank">PDF</a>`);
-  return a.join(" · ");
+// Per-row actions dropdown (native <details>). Items keep the same data-*
+// attributes the existing handlers already listen for.
+function actionsMenu(rec, type) {
+  const no = type === "invoice" ? rec["Invoice No."] : rec["Quote No."];
+  const items = [];
+  if (rec.DocLink) items.push(`<a href="${rec.DocLink}" target="_blank">Open Doc</a>`);
+  if (rec.PdfLink) items.push(`<a href="${rec.PdfLink}" target="_blank">Open PDF</a>`);
+  if (rec.PdfLink) items.push(`<button data-email="${no}">Email PDF…</button>`);
+  items.push(`<button data-edit="${no}">Edit</button>`);
+  if (type === "quote") {
+    const converted = rec["Converted to Inv."];
+    items.push(converted
+      ? `<span class="menu-note">Converted → ${converted}</span>`
+      : `<button data-convert="${no}">Convert to invoice</button>`);
+  }
+  items.push(`<button class="danger" data-del="${no}">Delete</button>`);
+  return `<details class="actions-menu">
+    <summary class="btn btn-ghost small">Actions ▾</summary>
+    <div class="menu">${items.join("")}</div>
+  </details>`;
+}
+
+// Close a row's dropdown after any item inside it is clicked.
+function wireMenuClose(container) {
+  container.querySelectorAll(".actions-menu .menu").forEach((menu) =>
+    menu.addEventListener("click", () => {
+      const d = menu.closest("details");
+      if (d) d.open = false;
+    })
+  );
 }
 function statusPill(s) {
   const tone = { Paid: "ok", Accepted: "ok", Received: "ok",
@@ -335,6 +358,71 @@ async function convertQuote(quoteNumber, quotes) {
   openForm("invoice", {
     prefill,
     afterSave: async (res) => { await markQuoteConverted(quoteNumber, res.number); },
+  });
+}
+
+// --- email a PDF -----------------------------------------------------------
+function emailPdfFlow(type, number, records) {
+  const key = type === "invoice" ? "Invoice No." : "Quote No.";
+  const rec = records.find((r) => r[key] === number);
+  if (!rec || !rec.PdfLink) { alert("No PDF found for this document."); return; }
+
+  const co = getCompany() || {};
+  const kindTitle = type === "invoice" ? "Tax Invoice" : "Quotation";
+  const subject = `${co.name ? co.name + " — " : ""}${kindTitle} ${number}`;
+  const body =
+    `Hi,\n\nPlease find attached ${kindTitle.toLowerCase()} ${number}` +
+    `${rec.Client ? " for " + rec.Client : ""}.\n\nKind regards,\n${co.name || ""}`;
+  const pdfName = `${number}.pdf`;
+
+  openEmailModal({
+    number,
+    defaultSubject: subject,
+    defaultBody: body,
+    onSend: ({ to, subject, body }) => emailPdf({ to, subject, body, pdfLink: rec.PdfLink, pdfName }),
+  });
+}
+
+function openEmailModal({ number, defaultSubject, defaultBody, onSend }) {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal">
+      <h3>Email PDF — ${number}</h3>
+      <label class="f"><span>To</span>
+        <input type="email" id="em-to" placeholder="client@example.com" autocomplete="off"/></label>
+      <label class="f"><span>Subject</span><input id="em-subject" value="${escA(defaultSubject)}"/></label>
+      <label class="f"><span>Message</span><textarea id="em-body" rows="6">${escH(defaultBody)}</textarea></label>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="em-cancel">Cancel</button>
+        <button class="btn btn-primary" id="em-send">Send from Gmail</button>
+      </div>
+      <div class="save-status" id="em-status"></div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  const $ = (id) => overlay.querySelector(id);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  $("#em-cancel").addEventListener("click", close);
+  $("#em-to").focus();
+
+  $("#em-send").addEventListener("click", async () => {
+    const to = $("#em-to").value.trim();
+    const status = $("#em-status");
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) { status.textContent = "Please enter a valid email address."; return; }
+    const btn = $("#em-send");
+    btn.disabled = true;
+    status.textContent = "Sending from your Gmail…";
+    try {
+      await onSend({ to, subject: $("#em-subject").value.trim(), body: $("#em-body").value });
+      status.textContent = "✅ Sent!";
+      setTimeout(close, 1000);
+    } catch (err) {
+      console.error(err);
+      status.textContent = "⚠️ " + (err.message || "Send failed");
+      btn.disabled = false;
+    }
   });
 }
 
@@ -449,6 +537,13 @@ async function boot() {
     b.addEventListener("click", () => { dropdown.hidden = true; show(b.dataset.view); })
   );
   document.addEventListener("click", () => { if (!dropdown.hidden) dropdown.hidden = true; });
+
+  // Close any open row-actions dropdown when clicking outside it.
+  document.addEventListener("click", (e) => {
+    document.querySelectorAll("details.actions-menu[open]").forEach((d) => {
+      if (!d.contains(e.target)) d.open = false;
+    });
+  });
 
   show("welcome");
 }
