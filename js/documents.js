@@ -8,7 +8,7 @@ import { GST_RATE } from "./config.js";
 
 // Fallback so a missing/blank Business Details tab renders gracefully.
 const EMPTY_COMPANY = {
-  name: "", slogan: "", addressLine1: "", addressLine2: "",
+  name: "", addressLine1: "", addressLine2: "",
   phone: "", email: "", licence: "", abn: "",
   bank: { bankName: "", accountName: "", bsb: "", account: "" },
 };
@@ -57,7 +57,6 @@ function letterhead(docTitle, c) {
     <tr>
       <td style="vertical-align:top;">
         <div style="font-size:22px; font-weight:bold; color:${BRAND};">${esc(c.name)}</div>
-        <div style="font-size:11px; color:${SOFT};">${esc(c.slogan)}</div>
         <div style="font-size:11px; color:${INK}; margin-top:6px;">
           ${esc(c.addressLine1)}<br/>${esc(c.addressLine2)}<br/>
           Ph. ${esc(c.phone)} &nbsp;·&nbsp; ${esc(c.email)}<br/>

@@ -23,6 +23,12 @@
     <div class="auth" id="auth">
       <span class="user" id="user-label"></span>
       <button id="signin-btn" class="btn btn-primary">Sign in with Google</button>
+      <div class="settings-menu" id="settings-menu" hidden>
+        <button id="settings-btn" class="icon-btn" aria-label="Settings" title="Settings">⚙</button>
+        <div class="dropdown" id="settings-dropdown" hidden>
+          <button data-view="business">Business details</button>
+        </div>
+      </div>
       <button id="signout-btn" class="btn btn-ghost" hidden>Sign out</button>
     </div>
   </header>
@@ -45,6 +51,7 @@
     <section id="view-dashboard" class="view" hidden></section>
     <section id="view-quotes" class="view" hidden></section>
     <section id="view-invoices" class="view" hidden></section>
+    <section id="view-business" class="view" hidden></section>
   </main>
 
   <!-- Google Identity Services (token client) -->

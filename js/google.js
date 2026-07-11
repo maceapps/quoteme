@@ -289,7 +289,6 @@ export const BUSINESS_TAB = "Business Details";
 // key = dot-path into the company object; example = generic hint (never real data).
 export const BUSINESS_FIELDS = [
   { key: "name",             label: "Company name",       example: "e.g. ABC Constructions" },
-  { key: "slogan",           label: "Slogan / trade",     example: "e.g. Quality building services" },
   { key: "addressLine1",     label: "Address line 1",     example: "e.g. 12 Example Street" },
   { key: "addressLine2",     label: "Address line 2",     example: "e.g. Suburb, State, 0000" },
   { key: "phone",            label: "Phone",              example: "e.g. 0400 000 000" },
@@ -307,6 +306,9 @@ function setPath(obj, path, value) {
   let o = obj;
   while (parts.length > 1) { const p = parts.shift(); o = o[p] = o[p] || {}; }
   o[parts[0]] = value;
+}
+function getPath(obj, path) {
+  return path.split(".").reduce((o, p) => (o == null ? o : o[p]), obj);
 }
 
 // Ensure the Business Details tab exists (seeded with blank values + hints).
@@ -337,4 +339,24 @@ export async function readBusinessDetails(spreadsheetId) {
   const company = { bank: {} };
   for (const f of BUSINESS_FIELDS) setPath(company, f.key, valueByLabel[f.label] || "");
   return company;
+}
+
+// Write a company object back into the Business Details tab (Value column).
+export async function writeBusinessDetails(spreadsheetId, company) {
+  const rows = await readRows(spreadsheetId, BUSINESS_TAB);
+  const valueByLabel = {};
+  for (const f of BUSINESS_FIELDS) valueByLabel[f.label] = getPath(company, f.key) ?? "";
+
+  // Align new values to the sheet's existing row order (skip the header row).
+  const colB = [];
+  for (let i = 1; i < rows.length; i++) {
+    const label = (rows[i][0] || "").trim();
+    colB.push([label in valueByLabel ? valueByLabel[label] : (rows[i][1] || "")]);
+  }
+  await gapi.client.sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${BUSINESS_TAB}!B2:B${rows.length}`,
+    valueInputOption: "RAW",
+    resource: { values: colB },
+  });
 }

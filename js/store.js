@@ -12,7 +12,7 @@ import {
   uploadHtmlAsDoc, exportDocAsPdf,
   appendRow, readRows, updateValues,
   getSheetId, deleteSheetRow, trashFile,
-  ensureBusinessSheet, readBusinessDetails, BUSINESS_TAB,
+  ensureBusinessSheet, readBusinessDetails, writeBusinessDetails, BUSINESS_TAB,
 } from "./google.js";
 import { buildDocumentHtml, computeTotals } from "./documents.js";
 
@@ -43,6 +43,13 @@ export async function businessSheetUrl() {
 
 // Re-read business details (after the user edits the sheet).
 export async function refreshCompany() {
+  ctx.company = await readBusinessDetails(ctx.sheetId);
+  return ctx.company;
+}
+
+// Save edited business details back to the sheet, then refresh the cache.
+export async function saveBusinessDetails(company) {
+  await writeBusinessDetails(ctx.sheetId, company);
   ctx.company = await readBusinessDetails(ctx.sheetId);
   return ctx.company;
 }

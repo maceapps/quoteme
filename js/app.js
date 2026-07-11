@@ -2,17 +2,17 @@
 //  app.js — bootstrap, sign-in, view switching, and the register views.
 // ============================================================================
 import { GOOGLE_CLIENT_ID } from "./config.js";
-import { initGoogle, signIn, signOut, getUserInfo } from "./google.js";
+import { initGoogle, signIn, signOut, getUserInfo, BUSINESS_FIELDS } from "./google.js";
 import {
   initStore, listQuotes, listInvoices,
   markQuoteConverted, setQuoteStatus, setInvoiceStatus, deleteDocument,
-  getCompany, businessDetailsComplete, businessSheetUrl, refreshCompany,
+  getCompany, businessDetailsComplete, businessSheetUrl, refreshCompany, saveBusinessDetails,
 } from "./store.js";
 import { renderForm } from "./forms.js";
 import { money } from "./documents.js";
 
 const el = (id) => document.getElementById(id);
-const state = { user: null };
+const state = { user: null, highlight: null };
 const num = (v) => Number(v) || 0;
 
 // --- view switching --------------------------------------------------------
@@ -25,12 +25,14 @@ function show(view) {
   if (view === "dashboard") renderDashboard();
   if (view === "quotes") renderQuotes();
   if (view === "invoices") renderInvoices();
+  if (view === "business") renderBusiness(false);
 }
 
 function setSignedInUI(signedIn) {
   el("tabs").hidden = !signedIn;
   el("signin-btn").hidden = signedIn;
   el("signout-btn").hidden = !signedIn;
+  el("settings-menu").hidden = !signedIn;
   el("user-label").textContent = signedIn && state.user ? state.user.email : "";
 }
 
@@ -71,7 +73,6 @@ async function renderDashboard() {
     <div class="page-head">
       <h2>Dashboard</h2>
       <div class="head-actions">
-        <button class="btn btn-ghost" id="edit-business">Business details</button>
         <button class="btn btn-primary" data-new="quote">+ New quote</button>
         <button class="btn btn-primary" data-new="invoice">+ New invoice</button>
       </div>
@@ -90,16 +91,14 @@ async function renderDashboard() {
   c.querySelectorAll("[data-new]").forEach((b) =>
     b.addEventListener("click", () => openForm(b.dataset.new))
   );
-  const editBtn = el("edit-business");
-  if (editBtn) editBtn.addEventListener("click", openBusinessDetails);
+  c.querySelectorAll("[data-goto]").forEach((a) =>
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      gotoRecord(a.dataset.goto, a.dataset.number);
+    })
+  );
   const bannerBtn = document.getElementById("banner-edit");
-  if (bannerBtn) bannerBtn.addEventListener("click", openBusinessDetails);
-  const refreshBtn = document.getElementById("banner-refresh");
-  if (refreshBtn) refreshBtn.addEventListener("click", async () => {
-    await refreshCompany();
-    applyBranding();
-    renderDashboard();
-  });
+  if (bannerBtn) bannerBtn.addEventListener("click", () => show("business"));
 }
 
 // Set the top-bar name from the loaded company details.
@@ -113,19 +112,12 @@ function setupBanner() {
   return `<div class="banner">
     <div>
       <strong>Finish setup:</strong> your business details (name, address, licence, ABN, bank)
-      aren't filled in yet. They live in a Google Sheet — add them so they appear on your documents.
+      aren't filled in yet. Add them so they appear on your quotes and invoices.
     </div>
     <div class="banner-actions">
-      <button class="btn btn-primary small" id="banner-edit">Open business details</button>
-      <button class="btn btn-ghost small" id="banner-refresh">I've filled them in</button>
+      <button class="btn btn-primary small" id="banner-edit">Set up business details</button>
     </div>
   </div>`;
-}
-
-// Open the Business Details tab of the register sheet in a new tab.
-async function openBusinessDetails() {
-  const url = await businessSheetUrl();
-  window.open(url, "_blank");
 }
 
 function statCard(label, value, tone = "") {
@@ -139,9 +131,29 @@ function recentList(quotes, invoices) {
   ].reverse().slice(0, 8);
   if (!rows.length) return `<p class="muted">Nothing yet — create your first quote or invoice above.</p>`;
   return `<table class="list"><tbody>${rows.map((r) => `
-    <tr><td>${r.kind}</td><td><strong>${r.n}</strong></td><td>${r.who || ""}</td>
+    <tr><td>${r.kind}</td>
+        <td><a href="#" class="link-num" data-goto="${r.kind.toLowerCase()}" data-number="${r.n}">${r.n}</a></td>
+        <td>${r.who || ""}</td>
         <td class="num">${money(r.t)}</td><td>${statusPill(r.s)}</td></tr>`).join("")}
   </tbody></table>`;
+}
+
+// Navigate to a record in its register tab and highlight it.
+function gotoRecord(kind, number) {
+  state.highlight = number;
+  show(kind === "invoice" ? "invoices" : "quotes");
+}
+
+// After a register view renders, flash + scroll to any pending target row.
+function applyHighlight(container) {
+  if (!state.highlight) return;
+  const tr = container.querySelector(`tr[data-num="${state.highlight}"]`);
+  state.highlight = null;
+  if (tr) {
+    tr.classList.add("row-flash");
+    tr.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => tr.classList.remove("row-flash"), 2000);
+  }
 }
 
 // --- quotes view -----------------------------------------------------------
@@ -178,12 +190,13 @@ async function renderQuotes() {
     })
   );
   wireDelete(c, "quote", renderQuotes);
+  applyHighlight(c);
 }
 
 function quoteRow(q) {
   const no = q["Quote No."];
   const converted = q["Converted to Inv."];
-  return `<tr>
+  return `<tr data-num="${no}">
     <td><strong>${no}</strong></td>
     <td>${q["Date Issued"]}</td>
     <td>${q.Client || ""}</td>
@@ -237,11 +250,12 @@ async function renderInvoices() {
       renderInvoices();
     })
   );
+  applyHighlight(c);
 }
 
 function invoiceRow(i) {
   const no = i["Invoice No."];
-  return `<tr>
+  return `<tr data-num="${no}">
     <td><strong>${no}</strong></td>
     <td>${i["Date Issued"]}</td>
     <td>${i.Client || ""}</td>
@@ -324,6 +338,87 @@ async function convertQuote(quoteNumber, quotes) {
   });
 }
 
+// --- business details page -------------------------------------------------
+const getPath = (o, p) => p.split(".").reduce((x, k) => (x == null ? x : x[k]), o);
+function setPath(o, p, v) {
+  const parts = p.split("."); let cur = o;
+  while (parts.length > 1) { const k = parts.shift(); cur = cur[k] = cur[k] || {}; }
+  cur[parts[0]] = v;
+}
+const escH = (s) => String(s ?? "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+const escA = (s) => String(s ?? "").replace(/"/g, "&quot;");
+
+async function renderBusiness(editing = false) {
+  const c = el("view-business");
+  if (!editing) {
+    c.innerHTML = `<p class="muted">Loading…</p>`;
+    try { await refreshCompany(); } catch (e) { console.error(e); }
+    applyBranding();
+  }
+  const co = getCompany() || {};
+
+  if (editing) return renderBusinessEdit(c, co);
+
+  const sheetUrl = await businessSheetUrl();
+  c.innerHTML = `
+    <div class="page-head">
+      <h2>Business details</h2>
+      <div class="head-actions"><button class="btn btn-primary" id="biz-edit">Edit</button></div>
+    </div>
+    <p class="muted">These appear on every quote and invoice.
+      <a href="${sheetUrl}" target="_blank">Open the source sheet</a>.</p>
+    <div class="detail-list">
+      ${BUSINESS_FIELDS.map((f) => {
+        const v = getPath(co, f.key);
+        return `<div class="detail-row">
+          <div class="detail-label">${f.label}</div>
+          <div class="detail-value">${v ? escH(v) : '<span class="muted">— not set —</span>'}</div>
+        </div>`;
+      }).join("")}
+    </div>`;
+  el("biz-edit").addEventListener("click", () => renderBusiness(true));
+}
+
+function renderBusinessEdit(c, co) {
+  c.innerHTML = `
+    <div class="page-head"><h2>Edit business details</h2></div>
+    <form id="biz-form" class="doc-form detail-form">
+      <fieldset><legend>Business details</legend>
+        <div class="grid">
+          ${BUSINESS_FIELDS.map((f) => `
+            <label class="f"><span>${f.label}</span>
+              <input name="${f.key}" value="${escA(getPath(co, f.key))}" placeholder="${escA(f.example)}"/>
+            </label>`).join("")}
+        </div>
+      </fieldset>
+      <div class="form-actions">
+        <button type="button" class="btn btn-ghost" id="biz-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="biz-save">Save</button>
+      </div>
+      <div class="save-status" id="biz-status"></div>
+    </form>`;
+
+  el("biz-cancel").addEventListener("click", () => renderBusiness(false));
+  el("biz-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = el("biz-save");
+    const status = el("biz-status");
+    btn.disabled = true;
+    status.textContent = "Saving to your Business Details sheet…";
+    const company = { bank: {} };
+    for (const f of BUSINESS_FIELDS) setPath(company, f.key, e.target.elements[f.key].value.trim());
+    try {
+      await saveBusinessDetails(company);
+      applyBranding();
+      renderBusiness(false);
+    } catch (err) {
+      console.error(err);
+      status.textContent = "⚠️ " + (err.message || "Save failed");
+      btn.disabled = false;
+    }
+  });
+}
+
 // --- boot ------------------------------------------------------------------
 async function boot() {
   if (GOOGLE_CLIENT_ID.startsWith("PASTE_")) {
@@ -343,6 +438,18 @@ async function boot() {
   document.querySelectorAll("#tabs button").forEach((b) =>
     b.addEventListener("click", () => show(b.dataset.view))
   );
+
+  // Settings cog dropdown
+  const dropdown = el("settings-dropdown");
+  el("settings-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    dropdown.hidden = !dropdown.hidden;
+  });
+  dropdown.querySelectorAll("[data-view]").forEach((b) =>
+    b.addEventListener("click", () => { dropdown.hidden = true; show(b.dataset.view); })
+  );
+  document.addEventListener("click", () => { if (!dropdown.hidden) dropdown.hidden = true; });
+
   show("welcome");
 }
 
