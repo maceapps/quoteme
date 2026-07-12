@@ -6,6 +6,7 @@
 import { QUOTE_VALID_DAYS, INVOICE_DUE_DAYS } from "./config.js";
 import { computeTotals, money } from "./documents.js";
 import { nextNumber, saveDocument, updateDocument, getCompany } from "./store.js";
+import { showLoading, hideLoading } from "./ui.js";
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 function addDays(iso, days) {
@@ -173,9 +174,8 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
     const saveBtn = container.querySelector("#save-btn");
     const status = container.querySelector("#save-status");
     saveBtn.disabled = true;
-    status.textContent = editMode
-      ? "Regenerating the document and updating the register…"
-      : "Generating document, saving to Drive and updating the register…";
+    status.textContent = "";
+    showLoading(editMode ? "Regenerating the document…" : "Generating the document…");
     try {
       const data = collectData(container, type, collectItems());
       const res = editMode ? await updateDocument(data) : await saveDocument(data);
@@ -187,6 +187,8 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
       console.error(err);
       status.textContent = "⚠️ " + (err.message || "Save failed");
       saveBtn.disabled = false;
+    } finally {
+      hideLoading();
     }
   });
 }

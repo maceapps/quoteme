@@ -5,19 +5,19 @@
 //  out the next document number.
 // ============================================================================
 import {
-  QUOTE_PREFIX, INVOICE_PREFIX, NUMBER_PAD,
+  QUOTE_PREFIX, INVOICE_PREFIX, NUMBER_PAD, DELETED_FOLDER_NAME,
 } from "./config.js";
 import {
-  ensureFolder, ensureRegisterSheet,
+  ensureFolder, ensureRegisterSheet, ensureSubFolder, moveFile,
   uploadHtmlAsDoc, exportDocAsPdf,
   appendRow, readRows, updateValues,
-  getSheetId, deleteSheetRow, trashFile, fetchDriveFile,
+  getSheetId, trashFile, fetchDriveFile,
   ensureBusinessSheet, readBusinessDetails, writeBusinessDetails, BUSINESS_TAB,
   sendGmailWithPdf,
 } from "./google.js";
 import { buildDocumentHtml, computeTotals } from "./documents.js";
 
-let ctx = { folderId: null, sheetId: null, company: null };
+let ctx = { folderId: null, sheetId: null, company: null, deletedFolderId: null };
 
 // Called once after sign-in so store.js knows where things live and who we are.
 export async function initStore() {
@@ -27,6 +27,15 @@ export async function initStore() {
   ctx.company = await readBusinessDetails(ctx.sheetId);
   return ctx;
 }
+
+// Lazily create/find the "Deleted" subfolder inside the documents folder.
+async function ensureDeletedFolder() {
+  if (!ctx.deletedFolderId) ctx.deletedFolderId = await ensureSubFolder(DELETED_FOLDER_NAME, ctx.folderId);
+  return ctx.deletedFolderId;
+}
+
+// Column letter for a 0-based index (A, B, … Z — enough for our register).
+function columnLetter(i) { return String.fromCharCode(65 + i); }
 
 // The company info loaded from the Business Details tab (or null before init).
 export function getCompany() { return ctx.company; }
@@ -174,11 +183,26 @@ function rowsToObjects(rows) {
     });
 }
 
+async function allRows(tab) {
+  return rowsToObjects(await readRows(ctx.sheetId, tab));
+}
+const isDeleted = (r) => !!(r._data && r._data.deleted);
+
+// Active (non-deleted) documents for the main list views.
 export async function listQuotes() {
-  return rowsToObjects(await readRows(ctx.sheetId, "Quotes"));
+  return (await allRows("Quotes")).filter((r) => !isDeleted(r));
 }
 export async function listInvoices() {
-  return rowsToObjects(await readRows(ctx.sheetId, "Invoices"));
+  return (await allRows("Invoices")).filter((r) => !isDeleted(r));
+}
+
+// All soft-deleted documents (both tabs), tagged with their type.
+export async function listDeleted() {
+  const [quotes, invoices] = await Promise.all([allRows("Quotes"), allRows("Invoices")]);
+  return [
+    ...quotes.filter(isDeleted).map((r) => ({ type: "quote", no: r["Quote No."], ...r })),
+    ...invoices.filter(isDeleted).map((r) => ({ type: "invoice", no: r["Invoice No."], ...r })),
+  ];
 }
 
 // --- find the sheet row (1-based) whose column A matches a document number -
@@ -229,27 +253,49 @@ export async function fetchPdfBlob(pdfLink) {
   return fetchDriveFile(id);
 }
 
-// Delete a quote/invoice: trash its Doc + PDF and remove its register row.
-export async function deleteDocument(type, number) {
+// Move a document's Doc + PDF between the documents folder and the Deleted
+// folder, and flip the `deleted` flag stored in the row's DataJSON. The row
+// stays in the register (so numbering keeps incrementing and a record remains).
+async function setDeletedState(type, number, deleted) {
   const tab = TAB[type];
   const rows = await readRows(ctx.sheetId, tab);
+  const header = rows[0] || [];
   let idx = -1;
   for (let i = 1; i < rows.length; i++) {
     if ((rows[i][0] || "").trim() === number) { idx = i; break; }
   }
   if (idx < 0) return;
+  const existing = rows[idx];
+  const getCol = (name) => existing[header.indexOf(name)] || "";
 
-  const header = rows[0];
-  const row = rows[idx];
-  const docLink = row[header.indexOf("DocLink")];
-  const pdfLink = row[header.indexOf("PdfLink")];
-  for (const link of [docLink, pdfLink]) {
-    const id = fileIdFromLink(link);
-    if (id) { try { await trashFile(id); } catch (e) { console.warn("Could not trash file", e); } }
+  // Move the files.
+  const deletedFolderId = await ensureDeletedFolder();
+  const [addParent, removeParent] = deleted
+    ? [deletedFolderId, ctx.folderId]
+    : [ctx.folderId, deletedFolderId];
+  for (const col of ["DocLink", "PdfLink"]) {
+    const id = fileIdFromLink(getCol(col));
+    if (id) { try { await moveFile(id, addParent, removeParent); } catch (e) { console.warn("Could not move file", e); } }
   }
 
-  const sheetId = await getSheetId(ctx.sheetId, tab);
-  await deleteSheetRow(ctx.sheetId, sheetId, idx); // array index idx == 0-based sheet row
+  // Update the deleted flag inside DataJSON (keeps everything else intact).
+  let data = {};
+  try { data = JSON.parse(getCol("DataJSON") || "{}"); } catch {}
+  if (deleted) { data.deleted = true; data.deletedAt = new Date().toISOString(); }
+  else { delete data.deleted; delete data.deletedAt; }
+
+  const col = columnLetter(header.indexOf("DataJSON"));
+  await updateValues(ctx.sheetId, `${tab}!${col}${idx + 1}`, [[JSON.stringify(data)]]);
+}
+
+// Soft-delete: hide from the interface, move files to the Deleted folder.
+export async function deleteDocument(type, number) {
+  return setDeletedState(type, number, true);
+}
+
+// Restore a soft-deleted document.
+export async function restoreDocument(type, number) {
+  return setDeletedState(type, number, false);
 }
 
 export function context() { return ctx; }

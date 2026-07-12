@@ -141,6 +141,24 @@ export async function ensureFolder() {
   return res.result.id;
 }
 
+// Ensure a subfolder with `name` exists inside `parentId`; returns its id.
+export async function ensureSubFolder(name, parentId) {
+  const existing = await findFile(name, { mimeType: "application/vnd.google-apps.folder", parentId });
+  if (existing) return existing.id;
+  const res = await gapi.client.drive.files.create({
+    resource: { name, mimeType: "application/vnd.google-apps.folder", parents: [parentId] },
+    fields: "id",
+  });
+  return res.result.id;
+}
+
+// Move a file between folders (change its parent).
+export async function moveFile(fileId, addParentId, removeParentId) {
+  await gapi.client.drive.files.update({
+    fileId, addParents: addParentId, removeParents: removeParentId, fields: "id",
+  });
+}
+
 // Upload an HTML string, converting it to a native Google Doc in `parentId`.
 // Returns { id, webViewLink }.
 export async function uploadHtmlAsDoc(name, html, parentId) {

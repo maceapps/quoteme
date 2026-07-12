@@ -7,10 +7,11 @@ import {
   initStore, listQuotes, listInvoices,
   markQuoteConverted, setQuoteStatus, setInvoiceStatus, deleteDocument,
   getCompany, businessDetailsComplete, businessSheetUrl, refreshCompany, saveBusinessDetails,
-  emailPdf, fetchPdfBlob,
+  emailPdf, fetchPdfBlob, listDeleted, restoreDocument,
 } from "./store.js";
 import { renderForm } from "./forms.js";
 import { money } from "./documents.js";
+import { withLoading } from "./ui.js";
 
 const el = (id) => document.getElementById(id);
 const state = { user: null, highlight: null };
@@ -27,6 +28,7 @@ function show(view) {
   if (view === "quotes") renderQuotes();
   if (view === "invoices") renderInvoices();
   if (view === "business") renderBusiness(false);
+  if (view === "deleted") renderDeleted();
 }
 
 function setSignedInUI(signedIn) {
@@ -40,12 +42,14 @@ function setSignedInUI(signedIn) {
 // --- sign-in ---------------------------------------------------------------
 // Shared path once we hold a valid token (from a click or a restored session).
 async function enterApp() {
-  state.user = await getUserInfo();
-  setSignedInUI(true);
-  el("view-dashboard").innerHTML = `<p class="muted">Setting up your Drive folder and register…</p>`;
-  show("dashboard");
-  await initStore();
-  applyBranding();
+  await withLoading("Signing in…", async () => {
+    state.user = await getUserInfo();
+    setSignedInUI(true);
+    el("view-dashboard").innerHTML = "";
+    show("dashboard");
+    await initStore();
+    applyBranding();
+  });
   renderDashboard();
 }
 
@@ -204,10 +208,12 @@ async function renderQuotes() {
     b.addEventListener("click", () => convertQuote(b.dataset.convert, quotes))
   );
   c.querySelectorAll("[data-qstatus]").forEach((sel) =>
-    sel.addEventListener("change", async () => {
-      await setQuoteStatus(sel.dataset.qstatus, sel.value);
-      renderQuotes();
-    })
+    sel.addEventListener("change", () =>
+      withLoading("Updating…", async () => {
+        await setQuoteStatus(sel.dataset.qstatus, sel.value);
+        await renderQuotes();
+      })
+    )
   );
   wireDelete(c, "quote", renderQuotes);
   c.querySelectorAll("[data-download]").forEach((b) =>
@@ -261,14 +267,16 @@ async function renderInvoices() {
   );
   wireDelete(c, "invoice", renderInvoices);
   c.querySelectorAll("[data-istatus]").forEach((sel) =>
-    sel.addEventListener("change", async () => {
-      const no = sel.dataset.istatus;
-      const paid = sel.value === "Paid";
-      await setInvoiceStatus(no, sel.value, paid
-        ? { datePaid: new Date().toISOString().slice(0, 10), received: sel.dataset.total }
-        : {});
-      renderInvoices();
-    })
+    sel.addEventListener("change", () =>
+      withLoading("Updating…", async () => {
+        const no = sel.dataset.istatus;
+        const paid = sel.value === "Paid";
+        await setInvoiceStatus(no, sel.value, paid
+          ? { datePaid: new Date().toISOString().slice(0, 10), received: sel.dataset.total }
+          : {});
+        await renderInvoices();
+      })
+    )
   );
   c.querySelectorAll("[data-download]").forEach((b) =>
     b.addEventListener("click", () => downloadPdfFlow("invoice", b.dataset.download, invoices))
@@ -299,11 +307,13 @@ function wireDelete(container, type, rerender) {
   container.querySelectorAll("[data-del]").forEach((b) =>
     b.addEventListener("click", async () => {
       const no = b.dataset.del;
-      if (!confirm(`Delete ${no}?\n\nIts row is removed from the register and the Doc + PDF are moved to your Google Drive trash (recoverable for ~30 days).`)) return;
+      if (!confirm(`Delete ${no}?\n\nIt will be hidden from the register and its Doc + PDF moved to the "Deleted" folder in Drive. You can restore it any time from Settings → Deleted documents.`)) return;
       b.disabled = true; b.textContent = "Deleting…";
       try {
-        await deleteDocument(type, no);
-        rerender();
+        await withLoading("Deleting…", async () => {
+          await deleteDocument(type, no);
+          await rerender();
+        });
       } catch (err) {
         console.error(err);
         alert("Delete failed: " + (err.message || "unknown error"));
@@ -383,7 +393,7 @@ async function convertQuote(quoteNumber, quotes) {
   };
   openForm("invoice", {
     prefill,
-    afterSave: async (res) => { await markQuoteConverted(quoteNumber, res.number); },
+    afterSave: (res) => withLoading("Linking to quote…", () => markQuoteConverted(quoteNumber, res.number)),
   });
 }
 
@@ -393,7 +403,7 @@ async function downloadPdfFlow(type, number, records) {
   const rec = records.find((r) => r[key] === number);
   if (!rec || !rec.PdfLink) { alert("No PDF found for this document."); return; }
   try {
-    const blob = await fetchPdfBlob(rec.PdfLink);
+    const blob = await withLoading("Preparing PDF…", () => fetchPdfBlob(rec.PdfLink));
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -462,7 +472,8 @@ function openEmailModal({ number, defaultSubject, defaultBody, onSend }) {
     btn.disabled = true;
     status.textContent = "Sending from your Gmail…";
     try {
-      await onSend({ to, subject: $("#em-subject").value.trim(), body: $("#em-body").value });
+      await withLoading("Sending email…", () =>
+        onSend({ to, subject: $("#em-subject").value.trim(), body: $("#em-body").value }));
       status.textContent = "✅ Sent!";
       setTimeout(close, 1000);
     } catch (err) {
@@ -543,7 +554,7 @@ function renderBusinessEdit(c, co) {
     const company = { bank: {} };
     for (const f of BUSINESS_FIELDS) setPath(company, f.key, e.target.elements[f.key].value.trim());
     try {
-      await saveBusinessDetails(company);
+      await withLoading("Saving…", () => saveBusinessDetails(company));
       applyBranding();
       renderBusiness(false);
     } catch (err) {
@@ -552,6 +563,62 @@ function renderBusinessEdit(c, co) {
       btn.disabled = false;
     }
   });
+}
+
+// --- deleted documents page ------------------------------------------------
+async function renderDeleted() {
+  const c = el("view-deleted");
+  c.innerHTML = `<p class="muted">Loading…</p>`;
+  const items = await listDeleted();
+  c.innerHTML = `
+    <div class="page-head"><h2>Deleted documents</h2></div>
+    <p class="muted">Hidden from your registers; their files live in the "Deleted" folder in Drive.
+      Open one to review it, or restore it to bring it back.</p>
+    ${items.length ? `
+    <table class="list">
+      <thead><tr><th>Type</th><th>No.</th><th>Client</th><th>Job / site</th>
+        <th class="num">Total</th><th>Deleted</th><th>Actions</th></tr></thead>
+      <tbody>${items.map(deletedRow).join("")}</tbody>
+    </table>` : `<p class="muted">No deleted documents.</p>`}
+  `;
+  c.querySelectorAll("[data-restore]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const type = b.dataset.type;
+      const no = b.dataset.restore;
+      if (!confirm(`Restore ${no}? It will reappear in ${type === "invoice" ? "Invoices" : "Quotes"} and its files move back.`)) return;
+      b.disabled = true; b.textContent = "Restoring…";
+      try {
+        await withLoading("Restoring…", async () => {
+          await restoreDocument(type, no);
+          await renderDeleted();
+        });
+      } catch (err) {
+        console.error(err);
+        alert("Restore failed: " + (err.message || "unknown error"));
+        b.disabled = false; b.textContent = "Restore";
+      }
+    })
+  );
+}
+
+function deletedRow(it) {
+  const no = it.no;
+  const when = it._data?.deletedAt ? new Date(it._data.deletedAt).toLocaleDateString() : "";
+  const links = [];
+  if (it.DocLink) links.push(`<a class="small" href="${it.DocLink}" target="_blank">Open Doc</a>`);
+  if (it.PdfLink) links.push(`<a class="small" href="${it.PdfLink}" target="_blank">Open PDF</a>`);
+  return `<tr>
+    <td>${it.type === "invoice" ? "Invoice" : "Quote"}</td>
+    <td><strong>${no}</strong></td>
+    <td>${it.Client || ""}</td>
+    <td>${it["Job / Site"] || ""}</td>
+    <td class="num">${money(it["Total (inc GST)"])}</td>
+    <td>${when}</td>
+    <td class="row-actions">
+      ${links.join(" · ")}
+      <button class="btn btn-ghost small" data-restore="${no}" data-type="${it.type}">Restore</button>
+    </td>
+  </tr>`;
 }
 
 // --- boot ------------------------------------------------------------------

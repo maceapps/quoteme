@@ -34,6 +34,7 @@ export const INVOICE_DUE_DAYS = 14;      // default "due date"   = issue + 14 da
 // --- 5. Drive / Sheet names the app will create ---------------------------
 export const DRIVE_FOLDER_NAME = "QuoteMe — Documents";
 export const REGISTER_SHEET_NAME = "QuoteMe — Register";
+export const DELETED_FOLDER_NAME = "Deleted";   // subfolder for soft-deleted docs
 
 // --- 6. Document numbering -------------------------------------------------
 export const QUOTE_PREFIX = "QTE-";
