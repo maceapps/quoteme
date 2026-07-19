@@ -57,7 +57,7 @@ export async function renderJobs(container) {
     button.addEventListener("click", async () => {
       const job = jobs.find((item) => item.id === button.dataset.deleteJob);
       if (!job || !confirm(
-        `Permanently delete “${job.name}”?\n\nThis cannot be undone. Existing quotes, invoices and timesheets will keep their saved job details.`,
+        `Delete “${job.name}”?\n\nIt will be hidden but can be restored from Settings → Deleted documents.`,
       )) return;
       try {
         await withLoading("Deleting job…", () => deleteJob(job.id));
@@ -95,7 +95,7 @@ function jobActions(job) {
     <summary class="btn btn-ghost small">Actions ▾</summary>
     <div class="menu">
       <button data-open-job="${escA(job.id)}">View</button>
-      <button class="danger" data-delete-job="${escA(job.id)}">Delete permanently</button>
+      <button class="danger" data-delete-job="${escA(job.id)}">Delete</button>
     </div>
   </details>`;
 }

@@ -12,7 +12,7 @@ import {
   ensureFolder, ensureRegisterSheet, ensureSubFolder, moveFile,
   uploadHtmlAsDoc, exportDocAsPdf,
   appendRow, readRows, updateValues, clearValues,
-  getSheetId, trashFile, deleteDriveFile, fetchDriveFile,
+  getSheetId, trashFile, fetchDriveFile,
   ensureBusinessSheet, readBusinessDetails, writeBusinessDetails, BUSINESS_TAB,
   sendGmailWithPdf, ensureTimesheetSheet,
 } from "./google.js";
@@ -30,6 +30,9 @@ import { validateWorker, validateWorkerId } from "./domain/workers.js";
 import {
   commitWithReconciliation, generateFilesWithCleanup, runDeletedStateChange,
 } from "./domain/workflows.js";
+import {
+  CURRENT_SCHEMA_VERSION, decodeDataEnvelope, encodeDataEnvelope, fileIdFromDriveLink,
+} from "./domain/data-schema.js";
 
 let ctx = {
   folderId: null,
@@ -48,8 +51,6 @@ export async function initStore() {
   ctx.company = await readBusinessDetails(ctx.sheetId);
   ctx.timesheetsFolderId = await ensureSubFolder(TIMESHEETS_FOLDER_NAME, ctx.folderId);
   ctx.timesheetsSheetId = await ensureTimesheetSheet(ctx.timesheetsFolderId);
-  const unresolvedLegacyJobs = await backfillLegacyTimesheetWorkerIds();
-  await clearLegacyJobWorkerAssociations(unresolvedLegacyJobs);
   return ctx;
 }
 
@@ -66,6 +67,34 @@ function columnLetter(i) {
     out = String.fromCharCode(65 + ((n - 1) % 26)) + out;
   }
   return out;
+}
+
+function hasV2Schema(headers) {
+  return headers.includes("Row Schema");
+}
+
+function payloadFromJson(raw, entityType) {
+  const decoded = decodeDataEnvelope(raw, entityType);
+  if (decoded.error || !decoded.payload) {
+    throw new Error(
+      `The ${entityType} row has invalid DataJSON (${decoded.error || "missing payload"}). ` +
+      "No changes were made.",
+    );
+  }
+  return decoded.payload;
+}
+
+function encodedPayload(entityType, payload, versioned) {
+  return versioned ? encodeDataEnvelope(entityType, payload) : JSON.stringify(payload);
+}
+
+function setNamedCell(row, headers, name, value) {
+  const index = headers.indexOf(name);
+  if (index >= 0) row[index] = value ?? "";
+}
+
+function recordUuid() {
+  return crypto.randomUUID();
 }
 
 // The company info loaded from the Business Details tab (or null before init).
@@ -103,68 +132,59 @@ const JOBS_TAB = "Jobs";
 const WORKERS_TAB = "Workers";
 const TIMESHEETS_TAB = "Timesheets";
 
-async function clearLegacyJobWorkerAssociations(skipJobIds = new Set()) {
-  if (!ctx.timesheetsSheetId) return;
-  const rows = await readRows(ctx.timesheetsSheetId, JOBS_TAB);
-  for (let index = 1; index < rows.length; index++) {
-    const row = rows[index];
-    if (skipJobIds.has(row[0])) continue;
-    let data = null;
-    let hadAssociation = row[12] && row[12] !== "[]";
-    try {
-      const parsed = JSON.parse(row[11] || "");
-      if (parsed && typeof parsed === "object") {
-        data = parsed;
-        if (Object.prototype.hasOwnProperty.call(data, "workerIds")) {
-          delete data.workerIds;
-          hadAssociation = true;
-        }
-      }
-    } catch {}
-    if (!hadAssociation) continue;
-    await updateValues(
-      ctx.timesheetsSheetId,
-      `${JOBS_TAB}!L${index + 1}:M${index + 1}`,
-      [[data ? JSON.stringify(data) : (row[11] || ""), "[]"]],
-    );
-  }
-}
-
 function makeId(prefix) {
   const id = globalThis.crypto?.randomUUID?.()
     || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   return `${prefix}-${id}`;
 }
 
-function jobRow(job, legacyWorkerIds = "[]") {
-  return [
+function jobRow(job, legacyWorkerIds = "[]", headers = []) {
+  const versioned = hasV2Schema(headers);
+  const row = [
     job.id, job.status || "Active", job.name, job.client?.name || "",
     job.client?.attn || "", job.client?.address || "", job.client?.suburb || "",
     job.client?.phone || "", job.jobSite || "", job.createdAt, job.updatedAt,
-    JSON.stringify(job),
+    encodedPayload("job", job, versioned),
     legacyWorkerIds, // Retained only while unresolved legacy timesheets need migration.
   ];
+  if (versioned) {
+    row.length = headers.length;
+    setNamedCell(row, headers, "Revision", job.revision || 1);
+    setNamedCell(row, headers, "Row Schema", CURRENT_SCHEMA_VERSION);
+    setNamedCell(row, headers, "Deleted At", job.deletedAt || "");
+  }
+  return row.map((value) => value ?? "");
 }
 
 function jobFromRow(row) {
-  if (row._data) {
-    const { workerIds: _legacyWorkerIds, ...job } = row._data;
-    return job;
-  }
+  const data = row._data || {};
+  const { workerIds: _legacyWorkerIds, ...job } = data;
   return {
-    id: row["Job ID"], status: row.Status || "Active", name: row["Job Name"],
+    ...job,
+    id: row["Job ID"] || job.id,
+    status: row.Status || job.status || "Active",
+    name: row["Job Name"] || job.name || "",
     client: {
-      name: row.Client || "", attn: row.Attn || "", address: row.Address || "",
-      suburb: row["Suburb / State / Postcode"] || "", phone: row.Phone || "",
+      ...(job.client || {}),
+      name: row.Client || job.client?.name || "",
+      attn: row.Attn || job.client?.attn || "",
+      address: row.Address || job.client?.address || "",
+      suburb: row["Suburb / State / Postcode"] || job.client?.suburb || "",
+      phone: row.Phone || job.client?.phone || "",
     },
-    jobSite: row["Job / Site"] || "",
-    createdAt: row.Created || "", updatedAt: row.Updated || "",
+    jobSite: row["Job / Site"] || job.jobSite || "",
+    createdAt: row.Created || job.createdAt || "",
+    updatedAt: row.Updated || job.updatedAt || "",
+    revision: Number(row.Revision || job.revision) || 1,
+    deletedAt: row["Deleted At"] || job.deletedAt || "",
   };
 }
 
 export async function listJobs({ includeArchived = false } = {}) {
   const rows = rowsToObjects(await readRows(ctx.timesheetsSheetId, JOBS_TAB));
-  return rows.map(jobFromRow).filter((job) => includeArchived || job.status !== "Archived");
+  return rows.map(jobFromRow)
+    .filter((job) => !job.deletedAt)
+    .filter((job) => includeArchived || job.status !== "Archived");
 }
 
 export async function saveJob(input) {
@@ -179,6 +199,7 @@ export async function saveJob(input) {
 
   const rows = await readRows(ctx.timesheetsSheetId, JOBS_TAB);
   const idx = rows.findIndex((row, i) => i > 0 && row[0] === job.id);
+  const headers = rows[0] || [];
   let legacyWorkerIds = idx >= 0 ? (rows[idx][12] || "[]") : "[]";
   if (idx >= 0 && legacyWorkerIds === "[]") {
     try {
@@ -186,7 +207,15 @@ export async function saveJob(input) {
       if (Array.isArray(ids) && ids.length) legacyWorkerIds = JSON.stringify(ids);
     } catch {}
   }
-  const values = jobRow(job, legacyWorkerIds);
+  if (idx >= 0) {
+    const existing = rowsToObjects([headers, rows[idx]])[0] || {};
+    job.revision = (Number(existing.Revision) || 1) + 1;
+    job.deletedAt = existing["Deleted At"] || "";
+  } else {
+    job.revision = 1;
+    job.deletedAt = "";
+  }
+  const values = jobRow(job, legacyWorkerIds, headers);
   if (idx < 0) {
     await appendRow(ctx.timesheetsSheetId, JOBS_TAB, values);
   } else {
@@ -216,95 +245,88 @@ export async function deleteJob(id) {
   if ((rows[index][1] || "Active") !== "Archived") {
     throw new Error("A job must be archived before it can be deleted.");
   }
-  const sheetRow = index + 1;
-  await clearValues(ctx.timesheetsSheetId, `${JOBS_TAB}!A${sheetRow}:M${sheetRow}`);
-  const remaining = await readRows(ctx.timesheetsSheetId, JOBS_TAB);
-  if (remaining.some((row, rowIndex) => rowIndex > 0 && row[0] === id)) {
-    throw new Error("Google Sheets did not remove the job row. Please try again.");
-  }
+  const headers = rows[0] || [];
+  const row = [...rows[index]];
+  const dataIndex = headers.indexOf("DataJSON");
+  const payload = payloadFromJson(row[dataIndex], "job");
+  const deletedAt = new Date().toISOString();
+  payload.deletedAt = deletedAt;
+  row[dataIndex] = encodedPayload("job", payload, hasV2Schema(headers));
+  setNamedCell(row, headers, "Deleted At", deletedAt);
+  setNamedCell(row, headers, "Revision", (Number(row[headers.indexOf("Revision")]) || 1) + 1);
+  await updateValues(
+    ctx.timesheetsSheetId,
+    `${JOBS_TAB}!A${index + 1}:${columnLetter(Math.max(row.length, headers.length) - 1)}${index + 1}`,
+    [row.map((value) => value ?? "")],
+  );
 }
 
-function workerRow(worker) {
-  return [
+export async function listDeletedJobs() {
+  const rows = rowsToObjects(await readRows(ctx.timesheetsSheetId, JOBS_TAB));
+  return rows.map(jobFromRow).filter((job) => !!job.deletedAt);
+}
+
+export async function restoreJob(id) {
+  id = validateJobDeleteCommand(id).id;
+  const rows = await readRows(ctx.timesheetsSheetId, JOBS_TAB);
+  const index = rows.findIndex((row, rowIndex) => rowIndex > 0 && row[0] === id);
+  if (index < 0) throw new Error("Job could not be found.");
+  const headers = rows[0] || [];
+  const row = [...rows[index]];
+  const dataIndex = headers.indexOf("DataJSON");
+  const payload = payloadFromJson(row[dataIndex], "job");
+  if (!row[headers.indexOf("Deleted At")] && !payload.deletedAt) {
+    throw new Error("This job is not deleted.");
+  }
+  delete payload.deletedAt;
+  row[dataIndex] = encodedPayload("job", payload, hasV2Schema(headers));
+  setNamedCell(row, headers, "Deleted At", "");
+  setNamedCell(row, headers, "Revision", (Number(row[headers.indexOf("Revision")]) || 1) + 1);
+  await updateValues(
+    ctx.timesheetsSheetId,
+    `${JOBS_TAB}!A${index + 1}:${columnLetter(Math.max(row.length, headers.length) - 1)}${index + 1}`,
+    [row.map((value) => value ?? "")],
+  );
+}
+
+function workerRow(worker, headers = []) {
+  const versioned = hasV2Schema(headers);
+  const row = [
     worker.id, worker.status || "Active", worker.firstName, worker.lastName,
-    worker.mobile || "", worker.createdAt, worker.updatedAt, JSON.stringify(worker),
+    worker.mobile || "", worker.createdAt, worker.updatedAt,
+    encodedPayload("worker", worker, versioned),
   ];
+  if (versioned) {
+    row.length = headers.length;
+    setNamedCell(row, headers, "Revision", worker.revision || 1);
+    setNamedCell(row, headers, "Row Schema", CURRENT_SCHEMA_VERSION);
+    setNamedCell(row, headers, "Deleted At", worker.deletedAt || "");
+  }
+  return row.map((value) => value ?? "");
 }
 
 function workerFromRow(row) {
-  if (row._data) return row._data;
+  const worker = row._data || {};
   return {
-    id: row["Worker ID"], status: row.Status || "Active",
-    firstName: row["First Name"] || "", lastName: row["Last Name"] || "",
-    mobile: row.Mobile || "", createdAt: row.Created || "", updatedAt: row.Updated || "",
+    ...worker,
+    id: row["Worker ID"] || worker.id,
+    status: row.Status || worker.status || "Active",
+    firstName: row["First Name"] || worker.firstName || "",
+    lastName: row["Last Name"] || worker.lastName || "",
+    mobile: row.Mobile || worker.mobile || "",
+    createdAt: row.Created || worker.createdAt || "",
+    updatedAt: row.Updated || worker.updatedAt || "",
+    revision: Number(row.Revision || worker.revision) || 1,
+    deletedAt: row["Deleted At"] || worker.deletedAt || "",
   };
 }
 
 export async function listWorkers({ includeArchived = false } = {}) {
   const rows = rowsToObjects(await readRows(ctx.timesheetsSheetId, WORKERS_TAB));
   return rows.map(workerFromRow)
+    .filter((worker) => !worker.deletedAt)
     .filter((worker) => includeArchived || worker.status !== "Archived")
     .sort((a, b) => `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`));
-}
-
-async function backfillLegacyTimesheetWorkerIds() {
-  if (!ctx.timesheetsSheetId) return new Set();
-  const [rows, jobRows, workers] = await Promise.all([
-    readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB),
-    readRows(ctx.timesheetsSheetId, JOBS_TAB),
-    listWorkers({ includeArchived: true }),
-  ]);
-  const byName = new Map();
-  for (const worker of workers) {
-    const name = `${worker.firstName} ${worker.lastName}`.trim().toLowerCase();
-    if (!name) continue;
-    byName.set(name, [...(byName.get(name) || []), worker]);
-  }
-  const workersByJob = new Map();
-  for (const row of jobRows.slice(1)) {
-    let ids = [];
-    try { ids = JSON.parse(row[12] || "[]"); } catch {}
-    if (!ids.length) {
-      try { ids = JSON.parse(row[11] || "{}").workerIds || []; } catch {}
-    }
-    workersByJob.set(row[0], new Set(ids));
-  }
-  const unresolvedJobIds = new Set();
-  for (let index = 1; index < rows.length; index++) {
-    const row = rows[index];
-    if (row[27] || !row[5]) continue;
-    let candidates = byName.get(String(row[5]).trim().toLowerCase()) || [];
-    if (candidates.length > 1) {
-      const assigned = workersByJob.get(row[3]) || new Set();
-      candidates = candidates.filter((candidate) => assigned.has(candidate.id));
-    }
-    const worker = candidates.length === 1 ? candidates[0] : null;
-    if (!worker) {
-      if (row[3]) unresolvedJobIds.add(row[3]);
-      continue;
-    }
-    let data = null;
-    try {
-      const parsed = JSON.parse(row[26] || "");
-      if (parsed && typeof parsed === "object" && parsed.id) data = parsed;
-    } catch {}
-    if (data) {
-      data.workerId = worker.id;
-      data.workerSnapshot = data.workerSnapshot || worker;
-      await updateValues(
-        ctx.timesheetsSheetId,
-        `${TIMESHEETS_TAB}!AA${index + 1}:AB${index + 1}`,
-        [[JSON.stringify(data), worker.id]],
-      );
-    } else {
-      await updateValues(
-        ctx.timesheetsSheetId,
-        `${TIMESHEETS_TAB}!AB${index + 1}`,
-        [[worker.id]],
-      );
-    }
-  }
-  return unresolvedJobIds;
 }
 
 export async function saveWorker(input) {
@@ -319,7 +341,16 @@ export async function saveWorker(input) {
 
   const rows = await readRows(ctx.timesheetsSheetId, WORKERS_TAB);
   const idx = rows.findIndex((row, i) => i > 0 && row[0] === worker.id);
-  const values = workerRow(worker);
+  const headers = rows[0] || [];
+  if (idx >= 0) {
+    const existing = rowsToObjects([headers, rows[idx]])[0] || {};
+    worker.revision = (Number(existing.Revision) || 1) + 1;
+    worker.deletedAt = existing["Deleted At"] || "";
+  } else {
+    worker.revision = 1;
+    worker.deletedAt = "";
+  }
+  const values = workerRow(worker, headers);
   if (idx < 0) {
     await appendRow(ctx.timesheetsSheetId, WORKERS_TAB, values);
   } else {
@@ -330,8 +361,6 @@ export async function saveWorker(input) {
       [values],
     );
   }
-  const unresolvedLegacyJobs = await backfillLegacyTimesheetWorkerIds();
-  await clearLegacyJobWorkerAssociations(unresolvedLegacyJobs);
   return worker;
 }
 
@@ -343,7 +372,8 @@ export async function archiveWorker(id) {
   return saveWorker({ ...worker, status: "Archived" });
 }
 
-function timesheetRow(sheet) {
+function timesheetRow(sheet, headers = []) {
+  const versioned = hasV2Schema(headers);
   const days = sheet.days || [];
   const dayCells = [];
   for (let i = 0; i < 7; i++) {
@@ -355,36 +385,56 @@ function timesheetRow(sheet) {
   const totalHours = Number.isInteger(sheet.totalHoursHundredths)
     ? hoursFromHundredths(sheet.totalHoursHundredths)
     : Number(sheet.totalHours) || 0;
-  return [
+  const row = [
     sheet.id, sheet.weekStart, sheet.weekEnd, sheet.jobId, sheet.jobName,
     sheet.workerName, ...dayCells, totalHours,
     sheet.weeklyNote || "", sheet.docLink || "", sheet.pdfLink || "",
-    sheet.createdAt, sheet.updatedAt, JSON.stringify(sheet),
+    sheet.createdAt, sheet.updatedAt, encodedPayload("timesheet", sheet, versioned),
     sheet.workerId || "",
   ];
+  if (versioned) {
+    row.length = headers.length;
+    setNamedCell(row, headers, "Revision", sheet.revision || 1);
+    setNamedCell(row, headers, "Row Schema", CURRENT_SCHEMA_VERSION);
+    setNamedCell(row, headers, "Doc File ID", sheet.docFileId || "");
+    setNamedCell(row, headers, "PDF File ID", sheet.pdfFileId || "");
+    setNamedCell(row, headers, "Deleted At", sheet.deletedAt || "");
+  }
+  return row.map((value) => value ?? "");
 }
 
 function timesheetFromRow(row) {
-  if (row._data) return { ...row._data, workerId: row._data.workerId || row["Worker ID"] || "" };
+  const data = row._data || {};
   const dayNames = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
   return {
-    id: row["Timesheet ID"], weekStart: row["Week Start"], weekEnd: row["Week End"],
-    jobId: row["Job ID"], jobName: row["Job Name"], workerName: row.Worker || "",
-    days: dayNames.map((name) => ({
+    ...data,
+    id: row["Timesheet ID"] || data.id,
+    weekStart: row["Week Start"] || data.weekStart,
+    weekEnd: row["Week End"] || data.weekEnd,
+    jobId: row["Job ID"] || data.jobId,
+    jobName: row["Job Name"] || data.jobName,
+    workerName: row.Worker || data.workerName || "",
+    days: data.days?.length === 7 ? data.days : dayNames.map((name) => ({
       date: row[`${name} Date`] || "",
       hours: Number(row[`${name} Hours`]) || 0,
     })),
-    totalHours: Number(row["Total Hours"]) || 0,
-    weeklyNote: row["Weekly Note"] || "",
-    docLink: row.DocLink || "", pdfLink: row.PdfLink || "",
-    workerId: row["Worker ID"] || "",
-    createdAt: row.Created || "", updatedAt: row.Updated || "",
+    totalHours: Number(row["Total Hours"] || data.totalHours) || 0,
+    weeklyNote: row["Weekly Note"] || data.weeklyNote || "",
+    docLink: row.DocLink || data.docLink || "",
+    pdfLink: row.PdfLink || data.pdfLink || "",
+    docFileId: row["Doc File ID"] || data.docFileId || fileIdFromDriveLink(row.DocLink),
+    pdfFileId: row["PDF File ID"] || data.pdfFileId || fileIdFromDriveLink(row.PdfLink),
+    workerId: row["Worker ID"] || data.workerId || "",
+    createdAt: row.Created || data.createdAt || "",
+    updatedAt: row.Updated || data.updatedAt || "",
+    revision: Number(row.Revision || data.revision) || 1,
+    deletedAt: row["Deleted At"] || data.deletedAt || "",
   };
 }
 
 export async function listTimesheets() {
   const rows = rowsToObjects(await readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB));
-  return rows.map(timesheetFromRow).sort((a, b) =>
+  return rows.map(timesheetFromRow).filter((sheet) => !sheet.deletedAt).sort((a, b) =>
     (b.weekStart || "").localeCompare(a.weekStart || "")
     || (b.updatedAt || "").localeCompare(a.updatedAt || ""));
 }
@@ -394,20 +444,48 @@ export async function deleteTimesheet(id) {
   const rows = await readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB);
   const index = rows.findIndex((row, rowIndex) => rowIndex > 0 && row[0] === id);
   if (index < 0) throw new Error("Timesheet could not be found.");
-  const row = rows[index];
-  await clearValues(ctx.timesheetsSheetId, `${TIMESHEETS_TAB}!A${index + 1}:AB${index + 1}`);
-  for (const link of [row[22], row[23]]) {
-    const fileId = fileIdFromLink(link);
-    if (fileId) {
-      try { await deleteDriveFile(fileId); } catch (error) {
-        console.warn("Could not permanently delete a generated timesheet file", error);
-      }
-    }
+  const headers = rows[0] || [];
+  const row = [...rows[index]];
+  const dataIndex = headers.indexOf("DataJSON");
+  const payload = payloadFromJson(row[dataIndex], "timesheet");
+  const deletedAt = new Date().toISOString();
+  payload.deletedAt = deletedAt;
+  row[dataIndex] = encodedPayload("timesheet", payload, hasV2Schema(headers));
+  setNamedCell(row, headers, "Deleted At", deletedAt);
+  setNamedCell(row, headers, "Revision", (Number(row[headers.indexOf("Revision")]) || 1) + 1);
+  await updateValues(
+    ctx.timesheetsSheetId,
+    `${TIMESHEETS_TAB}!A${index + 1}:${columnLetter(Math.max(row.length, headers.length) - 1)}${index + 1}`,
+    [row.map((value) => value ?? "")],
+  );
+}
+
+export async function listDeletedTimesheets() {
+  const rows = rowsToObjects(await readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB));
+  return rows.map(timesheetFromRow).filter((sheet) => !!sheet.deletedAt);
+}
+
+export async function restoreTimesheet(id) {
+  id = validateTimesheetDeleteCommand(id).id;
+  const rows = await readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB);
+  const index = rows.findIndex((row, rowIndex) => rowIndex > 0 && row[0] === id);
+  if (index < 0) throw new Error("Timesheet could not be found.");
+  const headers = rows[0] || [];
+  const row = [...rows[index]];
+  const dataIndex = headers.indexOf("DataJSON");
+  const payload = payloadFromJson(row[dataIndex], "timesheet");
+  if (!row[headers.indexOf("Deleted At")] && !payload.deletedAt) {
+    throw new Error("This timesheet is not deleted.");
   }
-  const remaining = await readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB);
-  if (remaining.some((item, rowIndex) => rowIndex > 0 && item[0] === id)) {
-    throw new Error("Google Sheets did not remove the timesheet. Please try again.");
-  }
+  delete payload.deletedAt;
+  row[dataIndex] = encodedPayload("timesheet", payload, hasV2Schema(headers));
+  setNamedCell(row, headers, "Deleted At", "");
+  setNamedCell(row, headers, "Revision", (Number(row[headers.indexOf("Revision")]) || 1) + 1);
+  await updateValues(
+    ctx.timesheetsSheetId,
+    `${TIMESHEETS_TAB}!A${index + 1}:${columnLetter(Math.max(row.length, headers.length) - 1)}${index + 1}`,
+    [row.map((value) => value ?? "")],
+  );
 }
 
 export async function getTimesheet(jobId, workerId, weekStart) {
@@ -420,6 +498,7 @@ export async function saveTimesheet(input, { allowDeletedJobForPdf = false } = {
   input = validateTimesheet(input);
   const now = new Date().toISOString();
   const rows = await readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB);
+  const headers = rows[0] || [];
   const idIdx = input.id
     ? rows.findIndex((row, i) => i > 0 && row[0] === input.id)
     : -1;
@@ -464,8 +543,12 @@ export async function saveTimesheet(input, { allowDeletedJobForPdf = false } = {
     updatedAt: now,
     docLink: input.docLink ?? existing?.docLink ?? "",
     pdfLink: input.pdfLink ?? existing?.pdfLink ?? "",
+    revision: existing ? (Number(existing.revision) || 1) + 1 : 1,
+    deletedAt: existing?.deletedAt || "",
   };
-  const values = timesheetRow(sheet);
+  sheet.docFileId = fileIdFromDriveLink(sheet.docLink);
+  sheet.pdfFileId = fileIdFromDriveLink(sheet.pdfLink);
+  const values = timesheetRow(sheet, headers);
   if (idx < 0) {
     await appendRow(ctx.timesheetsSheetId, TIMESHEETS_TAB, values);
   } else {
@@ -480,8 +563,11 @@ export async function saveTimesheet(input, { allowDeletedJobForPdf = false } = {
     (Object.prototype.hasOwnProperty.call(input, "docLink") && input.docLink === "")
     || (Object.prototype.hasOwnProperty.call(input, "pdfLink") && input.pdfLink === "");
   if (clearedGeneratedFiles && existing) {
-    for (const oldLink of [existing.docLink, existing.pdfLink]) {
-      const oldId = fileIdFromLink(oldLink);
+    for (const [storedId, oldLink] of [
+      [existing.docFileId, existing.docLink],
+      [existing.pdfFileId, existing.pdfLink],
+    ]) {
+      const oldId = storedId || fileIdFromDriveLink(oldLink);
       if (oldId) {
         try { await trashFile(oldId); } catch (e) { console.warn("Could not trash stale timesheet file", e); }
       }
@@ -536,8 +622,11 @@ export async function generateTimesheetPdf(input) {
       throw error;
     }
   }
-  for (const oldLink of [sheet.docLink, sheet.pdfLink]) {
-    const oldId = fileIdFromLink(oldLink);
+  for (const [storedId, oldLink] of [
+    [sheet.docFileId, sheet.docLink],
+    [sheet.pdfFileId, sheet.pdfLink],
+  ]) {
+    const oldId = storedId || fileIdFromDriveLink(oldLink);
     if (oldId) {
       try { await trashFile(oldId); } catch (e) { console.warn("Could not trash old timesheet file", e); }
     }
@@ -619,40 +708,90 @@ async function assertNumberAvailable(data) {
   if (rows.slice(1).some((row) => (row[0] || "").trim() === data.number)) {
     throw new Error(`${data.number} is already in use. Reopen the form to assign a new number.`);
   }
+  return rows;
 }
 
 // Build the register row (array) for a quote or invoice.
-function rowFor(data, totals, docLink, pdfLink) {
+function rowFor(data, totals, docLink, pdfLink, headers = [], metadata = {}) {
   const summary = summaryOf(data);
-  const dataJson = JSON.stringify(data);
+  const versioned = hasV2Schema(headers);
+  const dataJson = encodedPayload(data.type, data, versioned);
+  let row;
   if (data.type === "quote") {
-    return [
+    row = [
       data.number, data.dateIssued, data.client.name, data.jobSite, summary,
       totals.subtotal, totals.gst, totals.total, data.validUntil,
       data.status || "Pending", data.convertedTo || "", data.notes || "",
       docLink, pdfLink, dataJson,
     ];
+  } else {
+    row = [
+      data.number, data.issueDate, data.client.name, data.jobSite, summary,
+      totals.subtotal, totals.gst, totals.total, data.dueDate,
+      data.status || "Unpaid", data.datePaid || "", data.received || "",
+      data.notes || "", data.quoteRef || "",
+      docLink, pdfLink, dataJson,
+    ];
   }
-  return [
-    data.number, data.issueDate, data.client.name, data.jobSite, summary,
-    totals.subtotal, totals.gst, totals.total, data.dueDate,
-    data.status || "Unpaid", data.datePaid || "", data.received || "",
-    data.notes || "", data.quoteRef || "",
-    docLink, pdfLink, dataJson,
-  ];
+  if (versioned) {
+    row.length = headers.length;
+    setNamedCell(row, headers, "Record ID", metadata.recordId);
+    setNamedCell(row, headers, "Revision", metadata.revision || 1);
+    setNamedCell(row, headers, "Row Schema", CURRENT_SCHEMA_VERSION);
+    setNamedCell(row, headers, "Job ID", data.jobId);
+    setNamedCell(row, headers,
+      data.type === "quote" ? "Converted Invoice ID" : "Source Quote ID",
+      metadata.relationshipId || "");
+    setNamedCell(row, headers, "Doc File ID", metadata.docFileId);
+    setNamedCell(row, headers, "PDF File ID", metadata.pdfFileId);
+    setNamedCell(row, headers, "Created", metadata.createdAt);
+    setNamedCell(row, headers, "Updated", metadata.updatedAt);
+    setNamedCell(row, headers, "Deleted At", metadata.deletedAt || "");
+  }
+  return row.map((value) => value ?? "");
+}
+
+async function recordIdForNumber(tab, number) {
+  if (!number) return "";
+  const rows = await readRows(ctx.sheetId, tab);
+  const headers = rows[0] || [];
+  const idIndex = headers.indexOf("Record ID");
+  const match = rows.slice(1).find((row) => row[0] === number);
+  return idIndex >= 0 && match ? match[idIndex] || "" : "";
 }
 
 export async function saveDocument(data) {
   data = validateDocument(data);
-  await assertNumberAvailable(data);
+  const rows = await assertNumberAvailable(data);
+  const headers = rows[0] || [];
   const totals = computeTotals(data.lineItems);
+  const relationshipId = data.type === "invoice"
+    ? await recordIdForNumber("Quotes", data.quoteRef)
+    : "";
   const { doc, pdf } = await generateFiles(data);
-  const result = { docLink: doc.webViewLink, pdfLink: pdf.webViewLink, number: data.number };
+  const now = new Date().toISOString();
+  const metadata = {
+    recordId: recordUuid(),
+    revision: 1,
+    relationshipId,
+    docFileId: doc.id,
+    pdfFileId: pdf.id,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const result = {
+    docLink: doc.webViewLink,
+    pdfLink: pdf.webViewLink,
+    docFileId: doc.id,
+    pdfFileId: pdf.id,
+    recordId: metadata.recordId,
+    number: data.number,
+  };
   await commitWithReconciliation({
     write: () => appendRow(
       ctx.sheetId,
       TAB[data.type],
-      rowFor(data, totals, result.docLink, result.pdfLink),
+      rowFor(data, totals, result.docLink, result.pdfLink, headers, metadata),
     ),
     reconcile: () => generatedLinksCommitted(
       data.type,
@@ -685,6 +824,9 @@ export async function updateDocument(data) {
 
   // Regenerate the document files.
   const totals = computeTotals(data.lineItems);
+  const relationshipId = data.type === "quote"
+    ? getCol("Converted Invoice ID")
+    : getCol("Source Quote ID") || await recordIdForNumber("Quotes", data.quoteRef);
   const { doc, pdf } = await generateFiles(data);
 
   // Preserve status/workflow columns that aren't edited on the form.
@@ -692,7 +834,25 @@ export async function updateDocument(data) {
     ? { ...data, status: getCol("Status") || data.status, convertedTo: getCol("Converted to Inv.") }
     : { ...data, status: getCol("Status") || data.status, datePaid: getCol("Date Paid"), received: getCol("Received") };
 
-  const row = rowFor(merged, totals, doc.webViewLink, pdf.webViewLink);
+  const now = new Date().toISOString();
+  const metadata = {
+    recordId: getCol("Record ID") || recordUuid(),
+    revision: (Number(getCol("Revision")) || 1) + 1,
+    relationshipId,
+    docFileId: doc.id,
+    pdfFileId: pdf.id,
+    createdAt: getCol("Created") || now,
+    updatedAt: now,
+    deletedAt: getCol("Deleted At"),
+  };
+  const row = rowFor(
+    merged,
+    totals,
+    doc.webViewLink,
+    pdf.webViewLink,
+    header,
+    metadata,
+  );
   const lastCol = columnLetter(row.length - 1);
   const sheetRow = idx + 1;
   await commitWithReconciliation({
@@ -714,24 +874,43 @@ export async function updateDocument(data) {
 
   // The row now references the replacement files; retiring old files is safe.
   for (const col of ["DocLink", "PdfLink"]) {
-    const id = fileIdFromLink(getCol(col));
+    const id = getCol(col === "DocLink" ? "Doc File ID" : "PDF File ID")
+      || fileIdFromDriveLink(getCol(col));
     if (id) { try { await trashFile(id); } catch (e) { console.warn("Could not trash old file", e); } }
   }
 
-  return { docLink: doc.webViewLink, pdfLink: pdf.webViewLink, number: data.number };
+  return {
+    docLink: doc.webViewLink,
+    pdfLink: pdf.webViewLink,
+    docFileId: doc.id,
+    pdfFileId: pdf.id,
+    recordId: metadata.recordId,
+    number: data.number,
+  };
 }
 
 // --- read the register back for list views --------------------------------
 function rowsToObjects(rows) {
   if (!rows.length) return [];
   const headers = rows[0];
+  const entityType = headers.includes("Quote No.") ? "quote"
+    : headers.includes("Invoice No.") ? "invoice"
+      : headers.includes("Job ID") && headers.includes("Job Name") ? "job"
+        : headers.includes("Worker ID") && headers.includes("First Name") ? "worker"
+          : headers.includes("Timesheet ID") ? "timesheet"
+            : "";
   return rows.slice(1)
     .filter((r) => (r[0] || "").trim())
     .map((r) => {
       const o = {};
       headers.forEach((h, i) => (o[h] = r[i] ?? ""));
       // Recover the full original payload if present.
-      if (o.DataJSON) { try { o._data = JSON.parse(o.DataJSON); } catch {} }
+      if (o.DataJSON) {
+        const decoded = decodeDataEnvelope(o.DataJSON, entityType);
+        if (decoded.payload) o._data = decoded.payload;
+        if (decoded.error) o._dataError = decoded.error;
+        o._rowSchema = decoded.schemaVersion;
+      }
       return o;
     });
 }
@@ -739,7 +918,11 @@ function rowsToObjects(rows) {
 async function allRows(tab) {
   return rowsToObjects(await readRows(ctx.sheetId, tab));
 }
-const isDeleted = (r) => !!(r._data && r._data.deleted);
+const isDeleted = (row) => !!(
+  row["Deleted At"]
+  || row._data?.deletedAt
+  || row._data?.deleted
+);
 
 // Active (non-deleted) documents for the main list views.
 export async function listQuotes() {
@@ -758,43 +941,52 @@ export async function listDeleted() {
   ];
 }
 
-// --- find the sheet row (1-based) whose column A matches a document number -
-async function findRow(tab, number) {
+async function updateDocumentWorkflowRow(type, number, mutate) {
+  const tab = TAB[type];
   const rows = await readRows(ctx.sheetId, tab);
-  for (let i = 1; i < rows.length; i++) {
-    if ((rows[i][0] || "").trim() === number) return i + 1; // +1 → sheet row number
-  }
-  return null;
+  const headers = rows[0] || [];
+  const index = rows.findIndex((row, position) =>
+    position > 0 && String(row[0] || "").trim() === number);
+  if (index < 0) throw new Error(`${type === "quote" ? "Quote" : "Invoice"} could not be found.`);
+  const row = [...rows[index]];
+  const get = (name) => row[headers.indexOf(name)] || "";
+  const payload = payloadFromJson(get("DataJSON"), type);
+  await mutate({ row, headers, get, payload });
+  setNamedCell(row, headers, "DataJSON", encodedPayload(type, payload, hasV2Schema(headers)));
+  setNamedCell(row, headers, "Revision", (Number(get("Revision")) || 1) + 1);
+  setNamedCell(row, headers, "Row Schema", CURRENT_SCHEMA_VERSION);
+  setNamedCell(row, headers, "Updated", new Date().toISOString());
+  await updateValues(
+    ctx.sheetId,
+    `${tab}!A${index + 1}:${columnLetter(Math.max(row.length, headers.length) - 1)}${index + 1}`,
+    [row.map((value) => value ?? "")],
+  );
 }
 
 // Mark a quote Accepted and record which invoice it became.
 export async function markQuoteConverted(quoteNumber, invoiceNumber) {
   const command = validateConversionCommand(quoteNumber, invoiceNumber);
-  const [quotes, invoices] = await Promise.all([allRows("Quotes"), allRows("Invoices")]);
-  const quote = quotes.find((item) => item["Quote No."] === command.quoteNumber);
+  const invoices = await allRows("Invoices");
   const invoice = invoices.find((item) => item["Invoice No."] === command.invoiceNumber);
-  if (!quote) throw new Error("Quote could not be found.");
   if (!invoice) throw new Error("Converted invoice could not be found.");
-  validateStatusTransition("quote", quote.Status || "Pending", "Accepted");
-  const row = await findRow("Quotes", command.quoteNumber);
-  if (!row) throw new Error("Quote could not be found.");
-  await updateValues(
-    ctx.sheetId,
-    `Quotes!J${row}:K${row}`,
-    [["Accepted", command.invoiceNumber]],
-  );
+  await updateDocumentWorkflowRow("quote", command.quoteNumber, ({ row, headers, get, payload }) => {
+    validateStatusTransition("quote", get("Status") || "Pending", "Accepted");
+    setNamedCell(row, headers, "Status", "Accepted");
+    setNamedCell(row, headers, "Converted to Inv.", command.invoiceNumber);
+    setNamedCell(row, headers, "Converted Invoice ID", invoice["Record ID"] || "");
+    payload.status = "Accepted";
+    payload.convertedTo = command.invoiceNumber;
+  });
 }
 
 // Change a quote's status (Pending / Accepted / Declined).
 export async function setQuoteStatus(quoteNumber, status) {
   const command = validateQuoteStatusCommand(quoteNumber, status);
-  const quote = (await allRows("Quotes"))
-    .find((item) => item["Quote No."] === command.number);
-  if (!quote) throw new Error("Quote could not be found.");
-  validateStatusTransition("quote", quote.Status || "Pending", command.status);
-  const row = await findRow("Quotes", command.number);
-  if (!row) throw new Error("Quote could not be found.");
-  await updateValues(ctx.sheetId, `Quotes!J${row}`, [[command.status]]);
+  await updateDocumentWorkflowRow("quote", command.number, ({ row, headers, get, payload }) => {
+    validateStatusTransition("quote", get("Status") || "Pending", command.status);
+    setNamedCell(row, headers, "Status", command.status);
+    payload.status = command.status;
+  });
 }
 
 // Change an invoice's status; optionally record Date Paid + Received.
@@ -804,39 +996,30 @@ export async function setInvoiceStatus(invoiceNumber, status, { datePaid = "", r
     status,
     { datePaid, received },
   );
-  const invoice = (await allRows("Invoices"))
-    .find((item) => item["Invoice No."] === command.number);
-  if (!invoice) throw new Error("Invoice could not be found.");
-  validateStatusTransition("invoice", invoice.Status || "Unpaid", command.status);
-  const row = await findRow("Invoices", command.number);
-  if (!row) throw new Error("Invoice could not be found.");
-  await updateValues(
-    ctx.sheetId,
-    `Invoices!J${row}:L${row}`,
-    [[
-      command.status,
-      command.datePaid,
-      command.status === "Paid" ? dollarsFromCents(command.receivedCents) : "",
-    ]],
-  );
-}
-
-// Pull the Drive file id out of a webViewLink (…/d/<ID>/…).
-function fileIdFromLink(link) {
-  const m = /\/d\/([-\w]+)/.exec(link || "");
-  return m ? m[1] : null;
+  await updateDocumentWorkflowRow("invoice", command.number, ({ row, headers, get, payload }) => {
+    validateStatusTransition("invoice", get("Status") || "Unpaid", command.status);
+    const receivedValue = command.status === "Paid"
+      ? dollarsFromCents(command.receivedCents)
+      : "";
+    setNamedCell(row, headers, "Status", command.status);
+    setNamedCell(row, headers, "Date Paid", command.datePaid);
+    setNamedCell(row, headers, "Received", receivedValue);
+    payload.status = command.status;
+    payload.datePaid = command.datePaid;
+    payload.received = receivedValue;
+  });
 }
 
 // Email a document's PDF from the signed-in Gmail account.
 export async function emailPdf({ to, subject, body, pdfLink, pdfName }) {
-  const id = fileIdFromLink(pdfLink);
+  const id = fileIdFromDriveLink(pdfLink);
   if (!id) throw new Error("No PDF is attached to this document.");
   return sendGmailWithPdf({ to, subject, body, pdfFileId: id, pdfName });
 }
 
 // Fetch a document's PDF as a Blob (for downloading to the device).
 export async function fetchPdfBlob(pdfLink) {
-  const id = fileIdFromLink(pdfLink);
+  const id = fileIdFromDriveLink(pdfLink);
   if (!id) throw new Error("No PDF is attached to this document.");
   return fetchDriveFile(id);
 }
@@ -857,14 +1040,29 @@ async function setDeletedState(type, number, deleted) {
   const existing = rows[idx];
   const getCol = (name) => existing[header.indexOf(name)] || "";
 
-  // Update the deleted flag inside DataJSON (keeps everything else intact).
-  let data = {};
-  try { data = JSON.parse(getCol("DataJSON") || "{}"); } catch {}
-  if (deleted) { data.deleted = true; data.deletedAt = new Date().toISOString(); }
-  else { delete data.deleted; delete data.deletedAt; }
-
-  const col = columnLetter(header.indexOf("DataJSON"));
-  const dataRange = `${tab}!${col}${idx + 1}`;
+  const row = [...existing];
+  const data = payloadFromJson(getCol("DataJSON"), command.type);
+  const currentlyDeleted = !!(getCol("Deleted At") || data.deletedAt || data.deleted);
+  if (!deleted && !currentlyDeleted) throw new Error("This document is not deleted.");
+  if (deleted && currentlyDeleted) return;
+  const deletedAt = deleted ? new Date().toISOString() : "";
+  if (deleted) {
+    data.deleted = true;
+    data.deletedAt = deletedAt;
+  } else {
+    delete data.deleted;
+    delete data.deletedAt;
+  }
+  setNamedCell(
+    row,
+    header,
+    "DataJSON",
+    encodedPayload(command.type, data, hasV2Schema(header)),
+  );
+  setNamedCell(row, header, "Deleted At", deletedAt);
+  setNamedCell(row, header, "Revision", (Number(getCol("Revision")) || 1) + 1);
+  setNamedCell(row, header, "Row Schema", CURRENT_SCHEMA_VERSION);
+  setNamedCell(row, header, "Updated", new Date().toISOString());
 
   const deletedFolderId = await ensureDeletedFolder();
   const [addParent, removeParent] = deleted
@@ -874,10 +1072,15 @@ async function setDeletedState(type, number, deleted) {
   await runDeletedStateChange({
     deleting: deleted,
     writeState: () =>
-      updateValues(ctx.sheetId, dataRange, [[JSON.stringify(data)]]),
+      updateValues(
+        ctx.sheetId,
+        `${tab}!A${idx + 1}:${columnLetter(Math.max(row.length, header.length) - 1)}${idx + 1}`,
+        [row.map((value) => value ?? "")],
+      ),
     moveFiles: async () => {
       for (const linkCol of ["DocLink", "PdfLink"]) {
-        const id = fileIdFromLink(getCol(linkCol));
+        const id = getCol(linkCol === "DocLink" ? "Doc File ID" : "PDF File ID")
+          || fileIdFromDriveLink(getCol(linkCol));
         if (id) await moveFile(id, addParent, removeParent);
       }
     },

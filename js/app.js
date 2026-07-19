@@ -8,7 +8,8 @@ import {
   listJobs,
   markQuoteConverted, setQuoteStatus, setInvoiceStatus, deleteDocument,
   getCompany, businessDetailsComplete, businessSheetUrl, refreshCompany, saveBusinessDetails,
-  emailPdf, fetchPdfBlob, listDeleted, restoreDocument,
+  emailPdf, fetchPdfBlob, listDeleted, listDeletedJobs, listDeletedTimesheets,
+  restoreDocument, restoreJob, restoreTimesheet,
 } from "./store.js";
 import { renderForm } from "./forms.js";
 import { money } from "./documents.js";
@@ -22,6 +23,7 @@ import { beginRender } from "./rendering.js";
 import { todayISO } from "./domain/local-date.js";
 import { centsFromDollars, formatCents } from "./domain/money.js";
 import { INVOICE_STATUSES, QUOTE_STATUSES } from "./domain/documents.js";
+import { renderMigrationTools } from "./migration-ui.js";
 
 const el = (id) => document.getElementById(id);
 const state = { user: null, highlight: null };
@@ -57,6 +59,7 @@ async function show(view) {
     timesheets: () => renderAllTimesheets(el("view-timesheets")),
     business: () => renderBusiness(false),
     deleted: renderDeleted,
+    migration: () => renderMigrationTools(el("view-migration")),
   }[view];
   if (!renderer) return true;
   try {
@@ -673,28 +676,54 @@ async function renderDeleted() {
   const c = el("view-deleted");
   const isCurrent = beginRender(c);
   c.innerHTML = `<p class="muted">Loading…</p>`;
-  const items = await listDeleted();
+  const [documents, jobs, timesheets] = await Promise.all([
+    listDeleted(),
+    listDeletedJobs(),
+    listDeletedTimesheets(),
+  ]);
+  const items = [
+    ...documents,
+    ...jobs.map((job) => ({
+      type: "job",
+      no: job.id,
+      Client: job.client?.name || "",
+      "Job / Site": job.jobSite || job.name,
+      _data: { deletedAt: job.deletedAt },
+    })),
+    ...timesheets.map((sheet) => ({
+      type: "timesheet",
+      no: sheet.id,
+      Client: sheet.workerName,
+      "Job / Site": `${sheet.jobName} · ${sheet.weekStart}`,
+      _data: { deletedAt: sheet.deletedAt },
+    })),
+  ];
   if (!isCurrent()) return;
   c.innerHTML = `
-    <div class="page-head"><h2>Deleted documents</h2></div>
-    <p class="muted">Hidden from your registers; their files live in the "Deleted" folder in Drive.
-      Open one to review it, or restore it to bring it back.</p>
+    <div class="page-head"><h2>Deleted records</h2></div>
+    <p class="muted">Hidden from normal lists. Deleted quote and invoice files live in the "Deleted"
+      folder in Drive; records remain recoverable until an explicit purge.</p>
     ${items.length ? `
     <table class="list">
-      <thead><tr><th>Type</th><th>No.</th><th>Client</th><th>Job / site</th>
+      <thead><tr><th>Type</th><th>Reference</th><th>Client / worker</th><th>Job / site</th>
         <th class="num">Total</th><th>Deleted</th><th>Actions</th></tr></thead>
       <tbody>${items.map(deletedRow).join("")}</tbody>
-    </table>` : `<p class="muted">No deleted documents.</p>`}
+    </table>` : `<p class="muted">No deleted records.</p>`}
   `;
   c.querySelectorAll("[data-restore]").forEach((b) =>
     b.addEventListener("click", async () => {
       const type = b.dataset.type;
       const no = b.dataset.restore;
-      if (!confirm(`Restore ${no}? It will reappear in ${type === "invoice" ? "Invoices" : "Quotes"} and its files move back.`)) return;
+      const destination = {
+        invoice: "Invoices", quote: "Quotes", job: "Jobs", timesheet: "Timesheets",
+      }[type] || "the app";
+      if (!confirm(`Restore ${no}? It will reappear in ${destination}.`)) return;
       b.disabled = true; b.textContent = "Restoring…";
       try {
         await withLoading("Restoring…", async () => {
-          await restoreDocument(type, no);
+          if (type === "job") await restoreJob(no);
+          else if (type === "timesheet") await restoreTimesheet(no);
+          else await restoreDocument(type, no);
           await renderDeleted();
         });
       } catch (err) {
@@ -708,6 +737,7 @@ async function renderDeleted() {
 
 function deletedRow(it) {
   const no = it.no;
+  const isDocument = it.type === "quote" || it.type === "invoice";
   const when = it._data?.deletedAt ? new Date(it._data.deletedAt).toLocaleDateString() : "";
   const links = [];
   const docLink = safeGoogleUrl(it.DocLink);
@@ -715,11 +745,13 @@ function deletedRow(it) {
   if (docLink) links.push(`<a class="small" href="${escA(docLink)}" target="_blank" rel="noopener noreferrer">Open Doc</a>`);
   if (pdfLink) links.push(`<a class="small" href="${escA(pdfLink)}" target="_blank" rel="noopener noreferrer">Open PDF</a>`);
   return `<tr>
-    <td>${it.type === "invoice" ? "Invoice" : "Quote"}</td>
+    <td>${escH({
+      invoice: "Invoice", quote: "Quote", job: "Job", timesheet: "Timesheet",
+    }[it.type] || it.type)}</td>
     <td><strong>${escH(no)}</strong></td>
     <td>${escH(it.Client)}</td>
     <td>${escH(it["Job / Site"])}</td>
-    <td class="num">${money(it["Total (inc GST)"])}</td>
+    <td class="num">${isDocument ? money(it["Total (inc GST)"]) : "—"}</td>
     <td>${escH(when)}</td>
     <td class="row-actions">
       ${links.join(" · ")}

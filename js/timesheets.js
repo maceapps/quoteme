@@ -192,7 +192,7 @@ export async function renderAllTimesheets(container) {
         try {
           await withLoading("Deleting timesheet…", () => deleteTimesheet(sheet.id));
           sheets = sheets.filter((item) => item.id !== sheet.id);
-          message = "Timesheet permanently deleted.";
+          message = "Timesheet deleted. It can be restored from Settings.";
           render();
         } catch (error) {
           console.error(error);
@@ -312,7 +312,7 @@ export async function renderTimesheets(
         try {
           await withLoading("Deleting timesheet…", () => deleteTimesheet(sheet.id));
           sheets = sheets.filter((item) => item.id !== sheet.id);
-          message = "Timesheet permanently deleted.";
+          message = "Timesheet deleted. It can be restored from Settings.";
           renderList();
         } catch (error) {
           console.error(error);
@@ -502,10 +502,10 @@ function updateTotal(form) {
 
 function confirmTimesheetDelete(sheet) {
   return confirm(
-    `Permanently delete this timesheet?\n\n` +
+    `Delete this timesheet?\n\n` +
     `${sheet.workerName || "Worker"} · ${sheet.jobName || "Job"} · ` +
     `${displayDate(sheet.weekStart, true)} – ${displayDate(sheet.weekEnd, true)}\n\n` +
-    "This action cannot be undone.",
+    "It will be hidden and can be restored from Settings → Deleted documents.",
   );
 }
 

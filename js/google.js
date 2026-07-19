@@ -123,17 +123,26 @@ export async function getUserInfo() {
 //  DRIVE
 // ---------------------------------------------------------------------------
 
-// Find a file/folder this app created, by name + optional mimeType/parent.
-async function findFile(name, { mimeType, parentId } = {}) {
+// Find files/folders this app created, by exact name + optional type/parent.
+export async function findFilesExact(name, { mimeType, parentId } = {}) {
   const clauses = [`name = '${name.replace(/'/g, "\\'")}'`, "trashed = false"];
   if (mimeType) clauses.push(`mimeType = '${mimeType}'`);
   if (parentId) clauses.push(`'${parentId}' in parents`);
   const res = await gapi.client.drive.files.list({
     q: clauses.join(" and "),
-    fields: "files(id, name)",
+    fields: "files(id, name, mimeType, parents, modifiedTime, appProperties)",
     spaces: "drive",
+    orderBy: "modifiedTime desc",
   });
-  return res.result.files[0] || null;
+  return res.result.files || [];
+}
+
+async function findFile(name, options = {}) {
+  const files = await findFilesExact(name, options);
+  if (files.length > 1) {
+    throw new Error(`More than one app file named “${name}” was found. Resolve the duplicates before continuing.`);
+  }
+  return files[0] || null;
 }
 
 // Ensure the app's working folder exists; returns its id.
@@ -165,6 +174,61 @@ export async function moveFile(fileId, addParentId, removeParentId) {
   await gapi.client.drive.files.update({
     fileId, addParents: addParentId, removeParents: removeParentId, fields: "id",
   });
+}
+
+export async function copyDriveFile(fileId, name, parentId, appProperties = {}) {
+  const response = await gapi.client.drive.files.copy({
+    fileId,
+    fields: "id,name,mimeType,parents,modifiedTime",
+    resource: {
+      name,
+      parents: parentId ? [parentId] : undefined,
+      appProperties,
+    },
+  });
+  return response.result;
+}
+
+export async function getDriveFileMetadata(fileId) {
+  const response = await gapi.client.drive.files.get({
+    fileId,
+    fields: "id,name,mimeType,parents,modifiedTime,trashed",
+  });
+  return response.result;
+}
+
+export async function uploadJsonFile(name, value, parentId, appProperties = {}) {
+  const boundary = "-------quotemejson" + Math.random().toString(36).slice(2);
+  const metadata = {
+    name,
+    mimeType: "application/json",
+    parents: parentId ? [parentId] : undefined,
+    appProperties,
+  };
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
+    JSON.stringify(metadata) +
+    `\r\n--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
+    JSON.stringify(value) +
+    `\r\n--${boundary}--`;
+  const response = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`,
+      },
+      body,
+    },
+  );
+  if (!response.ok) throw new Error("Migration manifest upload failed: " + (await response.text()));
+  return response.json();
+}
+
+export async function readJsonFile(fileId) {
+  const blob = await fetchDriveFile(fileId);
+  return JSON.parse(await blob.text());
 }
 
 async function placeCreatedFileInFolder(fileId, parentId) {
@@ -317,9 +381,12 @@ export async function ensureTimesheetSheet(parentId) {
     parentId,
   });
   let spreadsheetId;
+  const created = !file;
 
   if (file) {
-    spreadsheetId = file.id;
+    // Existing workbooks are discovered without mutation. Any missing or
+    // incompatible tabs are handled by the explicit backup-first migration.
+    return file.id;
   } else {
     const create = await gapi.client.sheets.spreadsheets.create({
       resource: {
@@ -339,6 +406,11 @@ export async function ensureTimesheetSheet(parentId) {
   const existingTitles = new Set((meta.result.sheets || []).map((s) => s.properties.title));
   const missing = Object.keys(TIMESHEET_TABS).filter((title) => !existingTitles.has(title));
   if (missing.length) {
+    if (!created) {
+      throw new Error(
+        `The timesheet workbook is missing ${missing.join(", ")}. Use Data migration to repair it safely.`,
+      );
+    }
     await gapi.client.sheets.spreadsheets.batchUpdate({
       spreadsheetId,
       resource: {
@@ -356,14 +428,16 @@ export async function ensureTimesheetSheet(parentId) {
     const row = current.result.values?.[0] || [];
     const normalisedRow = row.map((value, index) =>
       title === "Jobs" && index === 12 && value === "Worker IDs" ? headers[index] : value);
-    const isCompatiblePrefix = normalisedRow.every((value, index) => value === headers[index]);
+    const isCompatiblePrefix = (created && row.length === 0)
+      || headers.every((value, index) => normalisedRow[index] === value);
     if (!isCompatiblePrefix) {
       throw new Error(
         `The ${title} tab in “${TIMESHEETS_SHEET_NAME}” has incompatible columns. ` +
         "Rename or remove that app-created spreadsheet, then sign in again.",
       );
     }
-    if (row.length !== headers.length || normalisedRow.some((value, index) => value !== row[index])) {
+    if (created && (row.length !== headers.length
+      || normalisedRow.some((value, index) => value !== row[index]))) {
       headerWrites.push({ range: `${title}!A1`, values: [headers] });
     }
   }
@@ -390,9 +464,57 @@ export async function appendRow(spreadsheetId, tab, values) {
 export async function readRows(spreadsheetId, tab) {
   const res = await gapi.client.sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${tab}!A1:AZ10000`,
+    range: `${tab}!A:AZ`,
   });
   return res.result.values || [];
+}
+
+export async function getSpreadsheetTabs(spreadsheetId) {
+  const response = await gapi.client.sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets.properties(title,sheetId)",
+  });
+  return (response.result.sheets || []).map((sheet) => sheet.properties);
+}
+
+export async function readWorkbookTabs(spreadsheetId, tabNames) {
+  const entries = await Promise.all(tabNames.map(async (tab) => [
+    tab,
+    await readRows(spreadsheetId, tab),
+  ]));
+  return Object.fromEntries(entries);
+}
+
+export async function applyWorkbookSchema(spreadsheetId, schemas) {
+  const existingTabs = await getSpreadsheetTabs(spreadsheetId);
+  const existingTitles = new Set(existingTabs.map((tab) => tab.title));
+  const missing = Object.keys(schemas).filter((title) => !existingTitles.has(title));
+  if (missing.length) {
+    await gapi.client.sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      resource: {
+        requests: missing.map((title) => ({ addSheet: { properties: { title } } })),
+      },
+    });
+  }
+
+  for (const [title, expected] of Object.entries(schemas)) {
+    const current = (await gapi.client.sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${title}!1:1`,
+    })).result.values?.[0] || [];
+    const normalized = current.map((value, index) =>
+      title === "Jobs" && index === 12 && value === "Worker IDs"
+        ? "Legacy Worker IDs (unused)"
+        : value);
+    if (!normalized.every((value, index) => value === expected[index])) {
+      throw new Error(`${title} has incompatible columns; migration stopped before writing rows.`);
+    }
+    if (normalized.length !== expected.length
+      || normalized.some((value, index) => value !== current[index])) {
+      await updateValues(spreadsheetId, `${title}!A1`, [expected]);
+    }
+  }
 }
 
 // Overwrite a specific range, e.g. updateValues(id, "Quotes!J8:K8", [["Accepted","INV-0003"]]).
