@@ -18,7 +18,7 @@ all from the browser, signed in with your own Google account.
 - Live line items with automatic GST (10%) totals
 - One-click **quote → invoice** conversion
 - **Email** a document's PDF straight from your Gmail, or **download** it
-- Dashboard: win rate, outstanding, totals
+- Dashboard: job counts, outstanding, and invoice totals
 - Status tracking (Pending/Accepted, Unpaid/Paid) written back to the Sheet
 - Each document saved as a Google Doc **and** a PDF in a Drive folder
 
@@ -61,11 +61,24 @@ warning, and troubleshooting.
 | `js/google.js` | Google sign-in + session, Drive, Sheets, Gmail |
 | `js/store.js` | Data layer: numbering, save/update/soft-delete, business details |
 | `js/documents.js` | Builds the quote/invoice HTML (→ Doc → PDF) |
+| `js/domain/` | Pure validation, dates, money, durations, statuses, and workflow contracts |
 | `js/forms.js` | Quote/invoice entry forms |
 | `js/app.js` | Dashboard, register views, deleted/business pages, wiring |
 | `js/ui.js` | Shared loading overlay |
 | `preview.html` | Standalone preview of the document design (sample data) |
 | `GOOGLE_SETUP.md` | Full Google Cloud setup + permissions guide |
+| `RECOVERY.md` | Backup, reconciliation, and restore baseline |
+
+## Testing
+
+The production app remains dependency-free. Tests and static checks use Node 22:
+
+```sh
+npm run ci
+```
+
+This validates module syntax/imports and runs the pure domain and failure-path tests.
+GitHub Actions runs the same command on every push and pull request.
 
 ## Deploying
 

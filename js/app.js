@@ -19,10 +19,12 @@ import { renderWorkers } from "./workers.js";
 import { escapeAttr as escA, escapeHtml as escH, safeGoogleUrl } from "./security.js";
 import { confirmNavigation, discardAllFormGuards, guardForm } from "./navigation.js";
 import { beginRender } from "./rendering.js";
+import { todayISO } from "./domain/local-date.js";
+import { centsFromDollars, formatCents } from "./domain/money.js";
+import { INVOICE_STATUSES, QUOTE_STATUSES } from "./domain/documents.js";
 
 const el = (id) => document.getElementById(id);
 const state = { user: null, highlight: null };
-const num = (v) => Number(v) || 0;
 let viewRequest = 0;
 
 // --- view switching --------------------------------------------------------
@@ -142,9 +144,11 @@ async function renderDashboard() {
   const activeJobs = jobs.filter((job) => (job.status || "Active") === "Active");
   const completedJobs = jobs.filter((job) => job.status === "Complete");
 
-  const invoiced = invoices.reduce((s, i) => s + num(i["Total (inc GST)"]), 0);
-  const received = invoices.reduce((s, i) => s + num(i.Received), 0);
-  const outstanding = invoiced - received;
+  const invoicedCents = invoices.reduce((sum, invoice) =>
+    sum + centsFromDollars(invoice["Total (inc GST)"]), 0);
+  const receivedCents = invoices.reduce((sum, invoice) =>
+    sum + centsFromDollars(invoice.Received), 0);
+  const outstandingCents = invoicedCents - receivedCents;
 
   c.innerHTML = `
     ${businessDetailsComplete() ? "" : setupBanner()}
@@ -159,9 +163,9 @@ async function renderDashboard() {
       ${statCard("Total jobs", jobs.length)}
       ${statCard("Active jobs", activeJobs.length)}
       ${statCard("Completed jobs", completedJobs.length)}
-      ${statCard("Total invoiced", money(invoiced))}
-      ${statCard("Received", money(received))}
-      ${statCard("Outstanding", money(outstanding), outstanding > 0 ? "bad" : "ok")}
+      ${statCard("Total invoiced", formatCents(invoicedCents))}
+      ${statCard("Received", formatCents(receivedCents))}
+      ${statCard("Outstanding", formatCents(outstandingCents), outstandingCents > 0 ? "bad" : "ok")}
     </div>
     <h3>Recent activity</h3>
     ${recentList(quotes, invoices)}
@@ -300,7 +304,7 @@ function quoteRow(q) {
     <td>${escH(q["Job / Site"])}</td>
     <td class="num">${money(q["Total (inc GST)"])}</td>
     <td>${escH(q["Valid Until"])}</td>
-    <td>${converted ? statusPill("Accepted") : statusSelect(no, q.Status, ["Pending", "Accepted", "Declined"], "qstatus")}</td>
+    <td>${converted ? statusPill("Accepted") : statusSelect(no, q.Status, QUOTE_STATUSES, "qstatus")}</td>
     <td class="row-actions">${actionsMenu(q, "quote")}</td>
   </tr>`;
 }
@@ -339,7 +343,7 @@ async function renderInvoices() {
         const no = sel.dataset.istatus;
         const paid = sel.value === "Paid";
         await setInvoiceStatus(no, sel.value, paid
-          ? { datePaid: new Date().toISOString().slice(0, 10), received: sel.dataset.total }
+          ? { datePaid: todayISO(), received: sel.dataset.total }
           : {});
         await renderInvoices();
         });
@@ -370,7 +374,7 @@ function invoiceRow(i) {
     <td>${escH(i["Job / Site"])}</td>
     <td class="num">${money(i["Total (inc GST)"])}</td>
     <td>${escH(i["Due Date"])}</td>
-    <td>${statusSelect(no, i.Status, ["Unpaid", "Paid", "Overdue"], "istatus", i["Total (inc GST)"])}</td>
+    <td>${statusSelect(no, i.Status, INVOICE_STATUSES, "istatus", i["Total (inc GST)"])}</td>
     <td class="row-actions">${actionsMenu(i, "invoice")}</td>
   </tr>`;
 }

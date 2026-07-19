@@ -2,6 +2,7 @@ import { archiveWorker, listWorkers, saveWorker } from "./store.js";
 import { withLoading } from "./ui.js";
 import { guardForm } from "./navigation.js";
 import { beginRender } from "./rendering.js";
+import { WORKER_STATUSES } from "./domain/workers.js";
 
 const escH = (value) => String(value ?? "").replace(/[<>&]/g, (c) =>
   ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
@@ -122,8 +123,8 @@ function renderWorkerForm(container, worker = null, onCancel = null, onSaved = n
           <input name="mobile" type="tel" value="${escA(worker?.mobile)}" autocomplete="tel"/>
         </label>
         <label class="f"><span>Status</span><select name="status">
-          <option ${worker?.status !== "Archived" ? "selected" : ""}>Active</option>
-          <option ${worker?.status === "Archived" ? "selected" : ""}>Archived</option>
+          ${WORKER_STATUSES.map((status) =>
+            `<option ${(!worker && status === "Active") || worker?.status === status ? "selected" : ""}>${status}</option>`).join("")}
         </select></label>
       </div></fieldset>
       <div class="form-actions">

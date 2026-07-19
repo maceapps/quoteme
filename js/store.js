@@ -17,6 +17,19 @@ import {
   sendGmailWithPdf, ensureTimesheetSheet,
 } from "./google.js";
 import { buildDocumentHtml, buildTimesheetHtml, computeTotals } from "./documents.js";
+import { validateBusinessDetails } from "./domain/business.js";
+import {
+  validateConversionCommand, validateDocument, validateDocumentStateCommand,
+  validateInvoiceStatusCommand, validateQuoteStatusCommand, validateStatusTransition,
+} from "./domain/documents.js";
+import { validateJob, validateJobDeleteCommand } from "./domain/jobs.js";
+import { hoursFromHundredths } from "./domain/hours.js";
+import { dollarsFromCents } from "./domain/money.js";
+import { validateTimesheet, validateTimesheetDeleteCommand } from "./domain/timesheets.js";
+import { validateWorker, validateWorkerId } from "./domain/workers.js";
+import {
+  commitWithReconciliation, generateFilesWithCleanup, runDeletedStateChange,
+} from "./domain/workflows.js";
 
 let ctx = {
   folderId: null,
@@ -77,7 +90,8 @@ export async function refreshCompany() {
 
 // Save edited business details back to the sheet, then refresh the cache.
 export async function saveBusinessDetails(company) {
-  await writeBusinessDetails(ctx.sheetId, company);
+  const validated = validateBusinessDetails(company);
+  await writeBusinessDetails(ctx.sheetId, validated);
   ctx.company = await readBusinessDetails(ctx.sheetId);
   return ctx.company;
 }
@@ -155,15 +169,13 @@ export async function listJobs({ includeArchived = false } = {}) {
 
 export async function saveJob(input) {
   const now = new Date().toISOString();
-  const { workerIds: _legacyWorkerIds, ...jobInput } = input;
-  const job = {
-    ...jobInput,
-    id: input.id || makeId("JOB"),
-    status: input.status || "Active",
-    createdAt: input.createdAt || now,
+  const validated = validateJob(input);
+  const job = validateJob({
+    ...validated,
+    id: validated.id || makeId("JOB"),
+    createdAt: validated.createdAt || now,
     updatedAt: now,
-  };
-  if (!job.name?.trim()) throw new Error("Job name is required.");
+  });
 
   const rows = await readRows(ctx.timesheetsSheetId, JOBS_TAB);
   const idx = rows.findIndex((row, i) => i > 0 && row[0] === job.id);
@@ -189,6 +201,7 @@ export async function saveJob(input) {
 }
 
 export async function archiveJob(id) {
+  id = validateJobDeleteCommand(id).id;
   const jobs = await listJobs({ includeArchived: true });
   const job = jobs.find((item) => item.id === id);
   if (!job) throw new Error("Job could not be found.");
@@ -196,6 +209,7 @@ export async function archiveJob(id) {
 }
 
 export async function deleteJob(id) {
+  id = validateJobDeleteCommand(id).id;
   const rows = await readRows(ctx.timesheetsSheetId, JOBS_TAB);
   const index = rows.findIndex((row, rowIndex) => rowIndex > 0 && row[0] === id);
   if (index < 0) throw new Error("Job could not be found.");
@@ -295,19 +309,13 @@ async function backfillLegacyTimesheetWorkerIds() {
 
 export async function saveWorker(input) {
   const now = new Date().toISOString();
-  const worker = {
-    ...input,
-    id: input.id || makeId("WORKER"),
-    firstName: input.firstName?.trim() || "",
-    lastName: input.lastName?.trim() || "",
-    mobile: input.mobile?.trim() || "",
-    status: input.status || "Active",
-    createdAt: input.createdAt || now,
+  const validated = validateWorker(input);
+  const worker = validateWorker({
+    ...validated,
+    id: validated.id || makeId("WORKER"),
+    createdAt: validated.createdAt || now,
     updatedAt: now,
-  };
-  if (!worker.firstName || !worker.lastName) {
-    throw new Error("First name and last name are required.");
-  }
+  });
 
   const rows = await readRows(ctx.timesheetsSheetId, WORKERS_TAB);
   const idx = rows.findIndex((row, i) => i > 0 && row[0] === worker.id);
@@ -328,6 +336,7 @@ export async function saveWorker(input) {
 }
 
 export async function archiveWorker(id) {
+  id = validateWorkerId(id);
   const workers = await listWorkers({ includeArchived: true });
   const worker = workers.find((item) => item.id === id);
   if (!worker) throw new Error("Worker could not be found.");
@@ -338,11 +347,17 @@ function timesheetRow(sheet) {
   const days = sheet.days || [];
   const dayCells = [];
   for (let i = 0; i < 7; i++) {
-    dayCells.push(days[i]?.date || "", Number(days[i]?.hours) || 0);
+    const hours = Number.isInteger(days[i]?.hoursHundredths)
+      ? hoursFromHundredths(days[i].hoursHundredths)
+      : Number(days[i]?.hours) || 0;
+    dayCells.push(days[i]?.date || "", hours);
   }
+  const totalHours = Number.isInteger(sheet.totalHoursHundredths)
+    ? hoursFromHundredths(sheet.totalHoursHundredths)
+    : Number(sheet.totalHours) || 0;
   return [
     sheet.id, sheet.weekStart, sheet.weekEnd, sheet.jobId, sheet.jobName,
-    sheet.workerName, ...dayCells, Number(sheet.totalHours) || 0,
+    sheet.workerName, ...dayCells, totalHours,
     sheet.weeklyNote || "", sheet.docLink || "", sheet.pdfLink || "",
     sheet.createdAt, sheet.updatedAt, JSON.stringify(sheet),
     sheet.workerId || "",
@@ -375,6 +390,7 @@ export async function listTimesheets() {
 }
 
 export async function deleteTimesheet(id) {
+  id = validateTimesheetDeleteCommand(id).id;
   const rows = await readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB);
   const index = rows.findIndex((row, rowIndex) => rowIndex > 0 && row[0] === id);
   if (index < 0) throw new Error("Timesheet could not be found.");
@@ -400,66 +416,8 @@ export async function getTimesheet(jobId, workerId, weekStart) {
     sheet.jobId === jobId && sheet.workerId === workerId && sheet.weekStart === weekStart) || null;
 }
 
-function dateOnly(iso) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
-  if (!match) return null;
-  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12);
-  return Number(match[1]) === date.getFullYear()
-    && Number(match[2]) === date.getMonth() + 1
-    && Number(match[3]) === date.getDate()
-    ? date
-    : null;
-}
-
-function localISO(date) {
-  const pad = (value) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
-
-function validatedTimesheet(input) {
-  if (!input.jobId) throw new Error("Please select a job.");
-  if (!input.workerId) throw new Error("Please select a worker.");
-  const workerName = input.workerName?.trim();
-  if (!workerName) throw new Error("Worker name is required.");
-  const start = dateOnly(input.weekStart);
-  if (!start || start.getDay() !== 1) throw new Error("The timesheet must start on a Monday.");
-  if (!Array.isArray(input.days) || input.days.length !== 7) {
-    throw new Error("The timesheet must contain Monday through Sunday.");
-  }
-
-  let totalHundredths = 0;
-  const days = input.days.map((day, index) => {
-    const expected = new Date(start);
-    expected.setDate(expected.getDate() + index);
-    const expectedISO = localISO(expected);
-    if (day.date !== expectedISO) throw new Error(`${expectedISO} is required for this timesheet day.`);
-    const raw = String(day.hours ?? "");
-    if (!/^\d+(?:\.\d{1,2})?$/.test(raw)) {
-      throw new Error("Daily hours must be numbers with no more than two decimal places.");
-    }
-    const hundredths = Math.round(Number(raw) * 100);
-    if (hundredths < 0 || hundredths > 2400) {
-      throw new Error("Daily hours must be between 0 and 24.");
-    }
-    totalHundredths += hundredths;
-    return { date: expectedISO, hours: hundredths / 100 };
-  });
-  if (!totalHundredths) throw new Error("Enter hours for at least one day.");
-
-  const end = new Date(start);
-  end.setDate(end.getDate() + 6);
-  return {
-    ...input,
-    workerName,
-    weekStart: localISO(start),
-    weekEnd: localISO(end),
-    days,
-    totalHours: totalHundredths / 100,
-  };
-}
-
 export async function saveTimesheet(input, { allowDeletedJobForPdf = false } = {}) {
-  input = validatedTimesheet(input);
+  input = validateTimesheet(input);
   const now = new Date().toISOString();
   const rows = await readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB);
   const idIdx = input.id
@@ -629,16 +587,11 @@ function summaryOf(data) {
 async function generateFiles(data) {
   const html = buildDocumentHtml(data, ctx.company);
   const baseName = `${data.number} — ${data.client.name || "Client"}`;
-  const doc = await uploadHtmlAsDoc(baseName, html, ctx.folderId);
-  try {
-    const pdf = await exportDocAsPdf(doc.id, baseName + ".pdf", ctx.folderId);
-    return { doc, pdf };
-  } catch (error) {
-    try { await trashFile(doc.id); } catch (cleanupError) {
-      console.warn("Could not clean up generated Doc after PDF failure", cleanupError);
-    }
-    throw error;
-  }
+  return generateFilesWithCleanup({
+    uploadDocument: () => uploadHtmlAsDoc(baseName, html, ctx.folderId),
+    exportPdf: (doc) => exportDocAsPdf(doc.id, baseName + ".pdf", ctx.folderId),
+    cleanupFile: (file) => trashFile(file.id),
+  });
 }
 
 async function cleanupGeneratedFiles(doc, pdf) {
@@ -690,28 +643,27 @@ function rowFor(data, totals, docLink, pdfLink) {
 }
 
 export async function saveDocument(data) {
-  if (!data.number) throw new Error("A document number is required.");
+  data = validateDocument(data);
   await assertNumberAvailable(data);
   const totals = computeTotals(data.lineItems);
   const { doc, pdf } = await generateFiles(data);
   const result = { docLink: doc.webViewLink, pdfLink: pdf.webViewLink, number: data.number };
-  try {
-    await appendRow(ctx.sheetId, TAB[data.type], rowFor(data, totals, result.docLink, result.pdfLink));
-  } catch (writeError) {
-    try {
-      if (await generatedLinksCommitted(data.type, data.number, result.docLink, result.pdfLink)) {
-        return result;
-      }
-    } catch (reconcileError) {
-      console.error("Could not reconcile an ambiguous document save", reconcileError);
-      throw new Error(
-        `Google did not confirm whether ${data.number} was saved. Refresh the register before retrying.`,
-        { cause: writeError },
-      );
-    }
-    await cleanupGeneratedFiles(doc, pdf);
-    throw writeError;
-  }
+  await commitWithReconciliation({
+    write: () => appendRow(
+      ctx.sheetId,
+      TAB[data.type],
+      rowFor(data, totals, result.docLink, result.pdfLink),
+    ),
+    reconcile: () => generatedLinksCommitted(
+      data.type,
+      data.number,
+      result.docLink,
+      result.pdfLink,
+    ),
+    cleanup: () => cleanupGeneratedFiles(doc, pdf),
+    ambiguousMessage:
+      `Google did not confirm whether ${data.number} was saved. Refresh the register before retrying.`,
+  });
   return result;
 }
 
@@ -719,6 +671,7 @@ export async function saveDocument(data) {
 //  Keeps the same number and sheet row. Regenerates the Doc + PDF (old ones
 //  go to trash) and preserves status fields that live on the row, not the form.
 export async function updateDocument(data) {
+  data = validateDocument(data);
   const tab = TAB[data.type];
   const rows = await readRows(ctx.sheetId, tab);
   const header = rows[0] || [];
@@ -742,23 +695,22 @@ export async function updateDocument(data) {
   const row = rowFor(merged, totals, doc.webViewLink, pdf.webViewLink);
   const lastCol = columnLetter(row.length - 1);
   const sheetRow = idx + 1;
-  try {
-    await updateValues(ctx.sheetId, `${tab}!A${sheetRow}:${lastCol}${sheetRow}`, [row]);
-  } catch (writeError) {
-    try {
-      if (!await generatedLinksCommitted(data.type, data.number, doc.webViewLink, pdf.webViewLink)) {
-        await cleanupGeneratedFiles(doc, pdf);
-        throw writeError;
-      }
-    } catch (reconcileError) {
-      if (reconcileError === writeError) throw writeError;
-      console.error("Could not reconcile an ambiguous document update", reconcileError);
-      throw new Error(
-        `Google did not confirm whether ${data.number} was updated. Refresh the register before retrying.`,
-        { cause: writeError },
-      );
-    }
-  }
+  await commitWithReconciliation({
+    write: () => updateValues(
+      ctx.sheetId,
+      `${tab}!A${sheetRow}:${lastCol}${sheetRow}`,
+      [row],
+    ),
+    reconcile: () => generatedLinksCommitted(
+      data.type,
+      data.number,
+      doc.webViewLink,
+      pdf.webViewLink,
+    ),
+    cleanup: () => cleanupGeneratedFiles(doc, pdf),
+    ambiguousMessage:
+      `Google did not confirm whether ${data.number} was updated. Refresh the register before retrying.`,
+  });
 
   // The row now references the replacement files; retiring old files is safe.
   for (const col of ["DocLink", "PdfLink"]) {
@@ -817,21 +769,56 @@ async function findRow(tab, number) {
 
 // Mark a quote Accepted and record which invoice it became.
 export async function markQuoteConverted(quoteNumber, invoiceNumber) {
-  const row = await findRow("Quotes", quoteNumber);
-  if (row) await updateValues(ctx.sheetId, `Quotes!J${row}:K${row}`, [["Accepted", invoiceNumber]]);
+  const command = validateConversionCommand(quoteNumber, invoiceNumber);
+  const [quotes, invoices] = await Promise.all([allRows("Quotes"), allRows("Invoices")]);
+  const quote = quotes.find((item) => item["Quote No."] === command.quoteNumber);
+  const invoice = invoices.find((item) => item["Invoice No."] === command.invoiceNumber);
+  if (!quote) throw new Error("Quote could not be found.");
+  if (!invoice) throw new Error("Converted invoice could not be found.");
+  validateStatusTransition("quote", quote.Status || "Pending", "Accepted");
+  const row = await findRow("Quotes", command.quoteNumber);
+  if (!row) throw new Error("Quote could not be found.");
+  await updateValues(
+    ctx.sheetId,
+    `Quotes!J${row}:K${row}`,
+    [["Accepted", command.invoiceNumber]],
+  );
 }
 
 // Change a quote's status (Pending / Accepted / Declined).
 export async function setQuoteStatus(quoteNumber, status) {
-  const row = await findRow("Quotes", quoteNumber);
-  if (row) await updateValues(ctx.sheetId, `Quotes!J${row}`, [[status]]);
+  const command = validateQuoteStatusCommand(quoteNumber, status);
+  const quote = (await allRows("Quotes"))
+    .find((item) => item["Quote No."] === command.number);
+  if (!quote) throw new Error("Quote could not be found.");
+  validateStatusTransition("quote", quote.Status || "Pending", command.status);
+  const row = await findRow("Quotes", command.number);
+  if (!row) throw new Error("Quote could not be found.");
+  await updateValues(ctx.sheetId, `Quotes!J${row}`, [[command.status]]);
 }
 
 // Change an invoice's status; optionally record Date Paid + Received.
 export async function setInvoiceStatus(invoiceNumber, status, { datePaid = "", received = "" } = {}) {
-  const row = await findRow("Invoices", invoiceNumber);
-  if (!row) return;
-  await updateValues(ctx.sheetId, `Invoices!J${row}:L${row}`, [[status, datePaid, received]]);
+  const command = validateInvoiceStatusCommand(
+    invoiceNumber,
+    status,
+    { datePaid, received },
+  );
+  const invoice = (await allRows("Invoices"))
+    .find((item) => item["Invoice No."] === command.number);
+  if (!invoice) throw new Error("Invoice could not be found.");
+  validateStatusTransition("invoice", invoice.Status || "Unpaid", command.status);
+  const row = await findRow("Invoices", command.number);
+  if (!row) throw new Error("Invoice could not be found.");
+  await updateValues(
+    ctx.sheetId,
+    `Invoices!J${row}:L${row}`,
+    [[
+      command.status,
+      command.datePaid,
+      command.status === "Paid" ? dollarsFromCents(command.receivedCents) : "",
+    ]],
+  );
 }
 
 // Pull the Drive file id out of a webViewLink (…/d/<ID>/…).
@@ -858,14 +845,15 @@ export async function fetchPdfBlob(pdfLink) {
 // folder, and flip the `deleted` flag stored in the row's DataJSON. The row
 // stays in the register (so numbering keeps incrementing and a record remains).
 async function setDeletedState(type, number, deleted) {
-  const tab = TAB[type];
+  const command = validateDocumentStateCommand(type, number);
+  const tab = TAB[command.type];
   const rows = await readRows(ctx.sheetId, tab);
   const header = rows[0] || [];
   let idx = -1;
   for (let i = 1; i < rows.length; i++) {
-    if ((rows[i][0] || "").trim() === number) { idx = i; break; }
+    if ((rows[i][0] || "").trim() === command.number) { idx = i; break; }
   }
-  if (idx < 0) return;
+  if (idx < 0) throw new Error("Document could not be found.");
   const existing = rows[idx];
   const getCol = (name) => existing[header.indexOf(name)] || "";
 
@@ -878,33 +866,24 @@ async function setDeletedState(type, number, deleted) {
   const col = columnLetter(header.indexOf("DataJSON"));
   const dataRange = `${tab}!${col}${idx + 1}`;
 
-  // A delete commits its tombstone before moving artifacts, so a file-move
-  // failure cannot leave an apparently active row with missing files.
-  if (deleted) {
-    await updateValues(ctx.sheetId, dataRange, [[JSON.stringify(data)]]);
-  }
-
   const deletedFolderId = await ensureDeletedFolder();
   const [addParent, removeParent] = deleted
     ? [deletedFolderId, ctx.folderId]
     : [ctx.folderId, deletedFolderId];
-  try {
-    for (const linkCol of ["DocLink", "PdfLink"]) {
-      const id = fileIdFromLink(getCol(linkCol));
-      if (id) await moveFile(id, addParent, removeParent);
-    }
-  } catch (error) {
-    const state = deleted ? "marked deleted" : "kept deleted";
-    throw new Error(
+  const state = deleted ? "marked deleted" : "kept deleted";
+  await runDeletedStateChange({
+    deleting: deleted,
+    writeState: () =>
+      updateValues(ctx.sheetId, dataRange, [[JSON.stringify(data)]]),
+    moveFiles: async () => {
+      for (const linkCol of ["DocLink", "PdfLink"]) {
+        const id = fileIdFromLink(getCol(linkCol));
+        if (id) await moveFile(id, addParent, removeParent);
+      }
+    },
+    partialMessage:
       `The record was ${state}, but one or more Drive files could not be moved. Retry from Deleted documents.`,
-      { cause: error },
-    );
-  }
-
-  // A restore becomes visible only after its artifacts have returned.
-  if (!deleted) {
-    await updateValues(ctx.sheetId, dataRange, [[JSON.stringify(data)]]);
-  }
+  });
 }
 
 // Soft-delete: hide from the interface, move files to the Deleted folder.

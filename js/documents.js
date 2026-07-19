@@ -5,6 +5,10 @@
 //  and inline styles, which Google Docs' HTML import reproduces reliably.
 // ============================================================================
 import { GST_RATE } from "./config.js";
+import {
+  centsFromDollars, computeTotalsCents, dollarsFromCents, formatCents, lineAmountCents,
+} from "./domain/money.js";
+import { formatLocalDate } from "./domain/local-date.js";
 
 // Fallback so a missing/blank Business Details tab renders gracefully.
 const EMPTY_COMPANY = {
@@ -15,16 +19,13 @@ const EMPTY_COMPANY = {
 
 // --- formatting helpers ----------------------------------------------------
 export function money(n) {
-  const v = Number(n) || 0;
-  return "$" + v.toLocaleString("en-AU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return formatCents(centsFromDollars(n));
 }
 
 export function fmtDate(iso) {
   if (!iso) return "—";
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
-  const d = match
-    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12)
-    : new Date(iso);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return formatLocalDate(iso);
+  const d = new Date(iso);
   if (isNaN(d)) return iso;
   const p = (x) => String(x).padStart(2, "0");
   return `${p(d.getDate())} / ${p(d.getMonth() + 1)} / ${d.getFullYear()}`;
@@ -32,16 +33,17 @@ export function fmtDate(iso) {
 
 // Amount for a line = qty × rate, or an explicit amount if given.
 export function lineAmount(item) {
-  if (item.amount !== "" && item.amount != null) return Number(item.amount) || 0;
-  const qty = Number(item.qty) || 0;
-  const rate = Number(item.rate) || 0;
-  return qty * rate;
+  return dollarsFromCents(lineAmountCents(item));
 }
 
 export function computeTotals(lineItems) {
-  const subtotal = lineItems.reduce((s, it) => s + lineAmount(it), 0);
-  const gst = subtotal * GST_RATE;
-  return { subtotal, gst, total: subtotal + gst };
+  const cents = computeTotalsCents(lineItems, Math.round(GST_RATE * 100));
+  return {
+    ...cents,
+    subtotal: dollarsFromCents(cents.subtotalCents),
+    gst: dollarsFromCents(cents.gstCents),
+    total: dollarsFromCents(cents.totalCents),
+  };
 }
 
 // --- shared building blocks ------------------------------------------------

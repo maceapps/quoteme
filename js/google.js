@@ -381,7 +381,7 @@ export async function appendRow(spreadsheetId, tab, values) {
   await gapi.client.sheets.spreadsheets.values.append({
     spreadsheetId,
     range: `${tab}!A1`,
-    valueInputOption: "USER_ENTERED",
+    valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
     resource: { values: [values] },
   });
@@ -400,7 +400,7 @@ export async function updateValues(spreadsheetId, range, values) {
   await gapi.client.sheets.spreadsheets.values.update({
     spreadsheetId,
     range,
-    valueInputOption: "USER_ENTERED",
+    valueInputOption: "RAW",
     resource: { values },
   });
 }

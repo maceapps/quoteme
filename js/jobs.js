@@ -3,6 +3,7 @@ import { withLoading } from "./ui.js";
 import { money } from "./documents.js";
 import { guardForm } from "./navigation.js";
 import { beginRender } from "./rendering.js";
+import { JOB_STATUSES } from "./domain/jobs.js";
 
 const escH = (value) => String(value ?? "").replace(/[<>&]/g, (c) =>
   ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
@@ -81,7 +82,7 @@ function jobRow(job) {
 function statusSelect(job) {
   const current = job.status || "Active";
   return `<select class="status-select" data-job-status="${escA(job.id)}">
-    ${["Active", "Complete", "Archived"].map((status) =>
+    ${JOB_STATUSES.map((status) =>
       `<option value="${status}" ${status === current ? "selected" : ""}>${status}</option>`).join("")}
   </select>`;
 }
@@ -210,9 +211,8 @@ function renderJobForm(container, job = null, onCancel = null, onSaved = null) {
       <fieldset><legend>Job</legend><div class="grid">
         ${input("Job name", "name", job?.name, true)}
         <label class="f"><span>Status</span><select name="status">
-          <option ${!job || job.status === "Active" ? "selected" : ""}>Active</option>
-          <option ${job?.status === "Complete" ? "selected" : ""}>Complete</option>
-          <option ${job?.status === "Archived" ? "selected" : ""}>Archived</option>
+          ${JOB_STATUSES.map((status) =>
+            `<option ${(!job && status === "Active") || job?.status === status ? "selected" : ""}>${status}</option>`).join("")}
         </select></label>
         ${input("Job / site address", "jobSite", job?.jobSite)}
       </div></fieldset>

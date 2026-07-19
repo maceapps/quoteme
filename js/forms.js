@@ -9,12 +9,11 @@ import { nextNumber, saveDocument, updateDocument, getCompany, listJobs, saveJob
 import { showLoading, hideLoading } from "./ui.js";
 import { guardForm } from "./navigation.js";
 import { safeGoogleUrl } from "./security.js";
+import { addLocalDays, localDateISO, todayISO } from "./domain/local-date.js";
+import { dollarsFromCents, lineAmountCents } from "./domain/money.js";
 
-const todayISO = () => new Date().toISOString().slice(0, 10);
 function addDays(iso, days) {
-  const d = new Date(iso);
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  return localDateISO(addLocalDays(iso, days));
 }
 
 const field = (label, name, value = "", type = "text", extra = "") => `
@@ -182,9 +181,16 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
     // auto-fill amount from qty × rate unless the amount cell itself was edited
     const tr = e.target.closest("tr");
     if (["qty", "rate"].includes(e.target.dataset.k)) {
-      const qty = Number(tr.querySelector('[data-k=qty]').value) || 0;
-      const rate = Number(tr.querySelector('[data-k=rate]').value) || 0;
-      if (qty && rate) tr.querySelector('[data-k=amount]').value = (qty * rate).toFixed(2);
+      const qty = tr.querySelector('[data-k=qty]').value;
+      const rate = tr.querySelector('[data-k=rate]').value;
+      if (qty && rate) {
+        try {
+          const cents = lineAmountCents({ qty, rate, amount: "" });
+          tr.querySelector('[data-k=amount]').value = dollarsFromCents(cents).toFixed(2);
+        } catch {
+          // Inputs may be temporarily incomplete while the user is typing.
+        }
+      }
     }
     recalc();
   });
@@ -197,11 +203,16 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
   });
 
   function recalc() {
-    const totals = computeTotals(collectItems());
-    container.querySelector("#totals-bar").innerHTML = `
-      <span>Subtotal (ex GST) <strong>${money(totals.subtotal)}</strong></span>
-      <span>GST (10%) <strong>${money(totals.gst)}</strong></span>
-      <span class="grand">Total (inc GST) <strong>${money(totals.total)}</strong></span>`;
+    try {
+      const totals = computeTotals(collectItems());
+      container.querySelector("#totals-bar").innerHTML = `
+        <span>Subtotal (ex GST) <strong>${money(totals.subtotal)}</strong></span>
+        <span>GST (10%) <strong>${money(totals.gst)}</strong></span>
+        <span class="grand">Total (inc GST) <strong>${money(totals.total)}</strong></span>`;
+    } catch {
+      container.querySelector("#totals-bar").textContent =
+        "Enter valid quantities and monetary amounts to calculate totals.";
+    }
   }
   function collectItems() {
     return [...body.querySelectorAll("tr")].map((tr) => ({

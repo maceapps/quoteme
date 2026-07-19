@@ -4,6 +4,9 @@ import {
 import { withLoading } from "./ui.js";
 import { guardForm } from "./navigation.js";
 import { beginRender } from "./rendering.js";
+import {
+  addLocalDays, displayLocalDate, localDateISO, mondayFor, todayLocalDate,
+} from "./domain/local-date.js";
 
 const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const escH = (value) => String(value ?? "").replace(/[<>&]/g, (c) =>
@@ -11,32 +14,16 @@ const escH = (value) => String(value ?? "").replace(/[<>&]/g, (c) =>
 const escA = (value) => escH(value).replace(/"/g, "&quot;");
 const workerName = (worker) => `${worker?.firstName || ""} ${worker?.lastName || ""}`.trim();
 
-function dateFromISO(iso) {
-  const [year, month, day] = String(iso).split("-").map(Number);
-  return new Date(year, month - 1, day, 12);
-}
-
-function dateISO(date) {
-  const pad = (value) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
-
 function addDays(iso, count) {
-  const date = dateFromISO(iso);
-  date.setDate(date.getDate() + count);
-  return dateISO(date);
+  return localDateISO(addLocalDays(iso, count));
 }
 
 function weekStartFor(iso) {
-  const date = dateFromISO(iso);
-  date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
-  return dateISO(date);
+  return localDateISO(mondayFor(iso));
 }
 
-const currentWeekStart = () => weekStartFor(dateISO(new Date()));
-const displayDate = (iso, year = false) => dateFromISO(iso).toLocaleDateString("en-AU", {
-  day: "2-digit", month: "short", ...(year ? { year: "numeric" } : {}),
-});
+const currentWeekStart = () => localDateISO(mondayFor(todayLocalDate()));
+const displayDate = (iso, year = false) => displayLocalDate(iso, year);
 const formatHours = (value) => {
   const number = Number(value) || 0;
   return number ? String(Math.round(number * 100) / 100) : "";
