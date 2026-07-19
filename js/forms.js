@@ -7,6 +7,8 @@ import { QUOTE_VALID_DAYS, INVOICE_DUE_DAYS } from "./config.js";
 import { computeTotals, money } from "./documents.js";
 import { nextNumber, saveDocument, updateDocument, getCompany, listJobs, saveJob } from "./store.js";
 import { showLoading, hideLoading } from "./ui.js";
+import { guardForm } from "./navigation.js";
+import { safeGoogleUrl } from "./security.js";
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 function addDays(iso, days) {
@@ -116,7 +118,7 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
 
       <div class="form-actions">
         <button type="button" class="btn btn-ghost" id="cancel-btn">Cancel</button>
-        <button type="submit" class="btn btn-primary" id="save-btn">
+        <button type="submit" class="btn btn-primary" id="save-btn" ${editMode ? "" : "disabled"}>
           ${editMode ? "Update" : "Generate"} &amp; save ${isQuote ? "quote" : "invoice"}
         </button>
       </div>
@@ -124,6 +126,10 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
     </form>
   `;
 
+  const form = container.querySelector("#doc-form");
+  const formGuard = guardForm(form, {
+    message: `Discard the unsaved ${isQuote ? "quote" : "invoice"}?`,
+  });
   const jobSelect = container.querySelector("#job-select");
   listJobs({ includeArchived: true }).then((allJobs) => {
     const jobs = allJobs.filter((job) =>
@@ -137,7 +143,6 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
     };
     const applyJob = (job) => {
       if (!job) return;
-      const form = container.querySelector("#doc-form");
       const values = {
         "client.name": job.client?.name || "",
         "client.attn": job.client?.attn || "",
@@ -158,6 +163,7 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
         jobs.push(job);
         renderJobOptions(job.id);
         applyJob(job);
+        formGuard.markDirty();
       }));
   }).catch((error) => {
     console.error(error);
@@ -169,6 +175,7 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
 
   container.querySelector("#add-item").addEventListener("click", () => {
     body.appendChild(itemRow(blankItem()));
+    formGuard.markDirty();
     recalc();
   });
   body.addEventListener("input", (e) => {
@@ -184,6 +191,7 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
   body.addEventListener("click", (e) => {
     if (e.target.classList.contains("del-item")) {
       e.target.closest("tr").remove();
+      formGuard.markDirty();
       recalc();
     }
   });
@@ -208,40 +216,80 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
 
   // number assignment — keep the existing number when editing, else assign next
   const docNoEl = container.querySelector("#doc-no");
+  const saveBtn = container.querySelector("#save-btn");
+  const saveStatus = container.querySelector("#save-status");
   if (editMode && p.number) {
     docNoEl.textContent = p.number;
     docNoEl.dataset.number = p.number;
+    saveBtn.disabled = false;
   } else {
     nextNumber(type).then((n) => {
       docNoEl.textContent = n;
       docNoEl.dataset.number = n;
+      saveBtn.disabled = false;
+    }).catch((error) => {
+      console.error(error);
+      docNoEl.textContent = "Number unavailable";
+      saveStatus.textContent = "⚠️ Could not assign a document number. Try reopening the form.";
     });
   }
 
-  container.querySelector("#cancel-btn").addEventListener("click", () => onSaved && onSaved(null));
+  container.querySelector("#cancel-btn").addEventListener("click", () =>
+    formGuard.leave(() => onSaved?.(null)));
 
-  container.querySelector("#doc-form").addEventListener("submit", async (e) => {
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const saveBtn = container.querySelector("#save-btn");
-    const status = container.querySelector("#save-status");
+    if (!docNoEl.dataset.number) {
+      saveStatus.textContent = "⚠️ Wait for a document number before saving.";
+      return;
+    }
     saveBtn.disabled = true;
-    status.textContent = "";
+    saveStatus.textContent = "";
     showLoading(editMode ? "Regenerating the document…" : "Generating the document…");
+    let result = null;
     try {
       const data = collectData(container, type, collectItems());
-      const res = editMode ? await updateDocument(data) : await saveDocument(data);
-      status.innerHTML = `✅ Saved <strong>${res.number}</strong> —
-        <a href="${res.docLink}" target="_blank">open Doc</a> ·
-        <a href="${res.pdfLink}" target="_blank">open PDF</a>`;
-      if (onSaved) setTimeout(() => onSaved(res), 900);
+      result = editMode ? await updateDocument(data) : await saveDocument(data);
+      formGuard.markClean();
+      formGuard.dispose();
+      renderSaveResult(saveStatus, result);
     } catch (err) {
       console.error(err);
-      status.textContent = "⚠️ " + (err.message || "Save failed");
+      saveStatus.textContent = "⚠️ " + (err.message || "Save failed");
       saveBtn.disabled = false;
     } finally {
       hideLoading();
     }
+    if (result && onSaved) {
+      try {
+        await onSaved(result);
+      } catch (error) {
+        console.error("Document saved, but its follow-up action failed", error);
+        alert(`The document was saved, but a follow-up action failed: ${error.message || "unknown error"}`);
+      }
+    }
   });
+}
+
+function renderSaveResult(status, result) {
+  status.replaceChildren();
+  status.append("✅ Saved ");
+  const number = document.createElement("strong");
+  number.textContent = result.number;
+  status.append(number);
+  const links = [
+    ["open Doc", safeGoogleUrl(result.docLink)],
+    ["open PDF", safeGoogleUrl(result.pdfLink)],
+  ].filter(([, url]) => url);
+  for (const [index, [label, url]] of links.entries()) {
+    status.append(index === 0 ? " — " : " · ");
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+    anchor.textContent = label;
+    status.append(anchor);
+  }
 }
 
 function openQuickJobModal(onSaved) {
@@ -269,13 +317,21 @@ function openQuickJobModal(onSaved) {
     </div>`;
   document.body.appendChild(overlay);
 
-  const close = () => overlay.remove();
+  const form = overlay.querySelector("#quick-job-form");
+  const formGuard = guardForm(form, {
+    message: "Discard this unsaved job?",
+    onDiscard: () => overlay.remove(),
+  });
+  const forceClose = () => {
+    formGuard.dispose();
+    overlay.remove();
+  };
+  const close = () => formGuard.leave(() => overlay.remove());
   overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
   overlay.querySelector("#quick-job-cancel").addEventListener("click", close);
   overlay.querySelector('[name="name"]').focus();
-  overlay.querySelector("#quick-job-form").addEventListener("submit", async (event) => {
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const form = event.currentTarget;
     const button = overlay.querySelector("#quick-job-save");
     const status = overlay.querySelector("#quick-job-status");
     const value = (name) => form.elements[name].value.trim();
@@ -295,7 +351,8 @@ function openQuickJobModal(onSaved) {
           phone: value("client.phone"),
         },
       });
-      close();
+      formGuard.markClean();
+      forceClose();
       await onSaved?.(job);
     } catch (error) {
       console.error(error);

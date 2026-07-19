@@ -2,6 +2,8 @@ import {
   deleteTimesheet, generateTimesheetPdf, listJobs, listTimesheets, listWorkers, saveTimesheet,
 } from "./store.js";
 import { withLoading } from "./ui.js";
+import { guardForm } from "./navigation.js";
+import { beginRender } from "./rendering.js";
 
 const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const escH = (value) => String(value ?? "").replace(/[<>&]/g, (c) =>
@@ -41,12 +43,14 @@ const formatHours = (value) => {
 };
 
 export async function renderAllTimesheets(container) {
+  const isCurrent = beginRender(container);
   container.innerHTML = `<p class="muted">Loading timesheets…</p>`;
   let [sheets, workers, jobs] = await Promise.all([
     listTimesheets(),
     listWorkers({ includeArchived: true }),
     listJobs({ includeArchived: true }),
   ]);
+  if (!isCurrent()) return;
   let selectedWorkerId = "";
   let selectedJobId = "";
   let showInactiveWorkers = false;
@@ -184,8 +188,10 @@ export async function renderAllTimesheets(container) {
             }));
           sheets = [result.sheet, ...sheets.filter((item) => item.id !== result.sheet.id)];
           sortSheets();
-          downloadBlob(result.blob, result.fileName);
-          message = "PDF saved in the Timesheets folder and downloaded.";
+          if (result.blob) downloadBlob(result.blob, result.fileName);
+          message = result.blob
+            ? "PDF saved in the Timesheets folder and downloaded."
+            : `PDF saved in the Timesheets folder, but the download failed: ${result.downloadError}`;
           render();
         } catch (error) {
           console.error(error);
@@ -215,12 +221,15 @@ export async function renderTimesheets(
   container,
   { workerId, startNew = false, onBack, onCancel, onSaved } = {},
 ) {
+  const isCurrent = beginRender(container);
   container.innerHTML = `<p class="muted">Loading timesheets…</p>`;
   const [workers, jobs] = await Promise.all([
     listWorkers({ includeArchived: true }),
     listJobs({ includeArchived: true }),
   ]);
+  if (!isCurrent()) return;
   let sheets = await listTimesheets();
+  if (!isCurrent()) return;
   const activeWorkers = workers.filter((item) => item.status !== "Archived");
   const worker = activeWorkers.find((item) => item.id === workerId) || activeWorkers[0];
   if (!worker) {
@@ -248,7 +257,6 @@ export async function renderTimesheets(
   let message = "";
 
   function renderList() {
-    window.__quoteMeNavigationGuard = null;
     const saved = workerSheets();
     container.innerHTML = header(worker, onBack) + `
       <div class="section-head">
@@ -300,8 +308,10 @@ export async function renderTimesheets(
                 || { name: sheet.jobName },
             }));
           sheets = [result.sheet, ...sheets.filter((item) => item.id !== result.sheet.id)];
-          downloadBlob(result.blob, result.fileName);
-          message = "PDF saved in the Timesheets folder and downloaded.";
+          if (result.blob) downloadBlob(result.blob, result.fileName);
+          message = result.blob
+            ? "PDF saved in the Timesheets folder and downloaded."
+            : `PDF saved in the Timesheets folder, but the download failed: ${result.downloadError}`;
           renderList();
         } catch (error) {
           console.error(error);
@@ -393,18 +403,11 @@ export async function renderTimesheets(
       </form>`;
 
     const form = container.querySelector("#timesheet-form");
-    let dirty = false;
-    const confirmLeave = () =>
-      !dirty || confirm("Discard the unsaved changes to this timesheet?");
-    window.__quoteMeNavigationGuard = confirmLeave;
-    const leaveForm = (action) => {
-      if (!confirmLeave()) return false;
-      window.__quoteMeNavigationGuard = null;
-      action();
-      return true;
-    };
-    form.querySelectorAll(".hours-input, textarea[name=weeklyNote]").forEach((input) =>
-      input.addEventListener("input", () => { dirty = true; }));
+    const formGuard = guardForm(form, {
+      message: "Discard the unsaved changes to this timesheet?",
+      dirtySelector: ".hours-input, textarea[name=weeklyNote]",
+    });
+    const leaveForm = (action) => formGuard.leave(action);
     container.querySelector("#timesheet-back").addEventListener("click", () =>
       leaveForm(() => onBack?.()));
     container.querySelector("#cancel-timesheet").addEventListener("click", () =>
@@ -449,8 +452,9 @@ export async function renderTimesheets(
         }));
         sheets = [saved, ...sheets.filter((item) => item.id !== saved.id)];
         message = "Timesheet saved to Google Drive.";
-        window.__quoteMeNavigationGuard = null;
-        if (onSaved) onSaved(saved);
+        formGuard.markClean();
+        formGuard.dispose();
+        if (onSaved) await onSaved(saved);
         else renderList();
       } catch (error) {
         console.error(error);

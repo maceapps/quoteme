@@ -556,14 +556,27 @@ export async function generateTimesheetPdf(input) {
       { allowDeletedJobForPdf: true },
     );
   } catch (error) {
-    for (const file of [doc, pdf]) {
-      if (file?.id) {
-        try { await trashFile(file.id); } catch (cleanupError) {
-          console.warn("Could not clean up failed timesheet file", cleanupError);
+    if (doc && pdf) {
+      try {
+        const current = (await listTimesheets()).find((item) => item.id === sheet.id);
+        if (current?.docLink === doc.webViewLink && current?.pdfLink === pdf.webViewLink) {
+          updated = current;
+        } else {
+          await cleanupGeneratedFiles(doc, pdf);
+          throw error;
         }
+      } catch (reconcileError) {
+        if (reconcileError === error) throw error;
+        console.error("Could not reconcile an ambiguous timesheet PDF save", reconcileError);
+        throw new Error(
+          "Google did not confirm whether the timesheet PDF was saved. Refresh before trying again.",
+          { cause: error },
+        );
       }
+    } else {
+      await cleanupGeneratedFiles(doc, pdf);
+      throw error;
     }
-    throw error;
   }
   for (const oldLink of [sheet.docLink, sheet.pdfLink]) {
     const oldId = fileIdFromLink(oldLink);
@@ -572,11 +585,15 @@ export async function generateTimesheetPdf(input) {
     }
   }
 
-  return {
-    sheet: updated,
-    blob: await fetchDriveFile(pdf.id),
-    fileName: `${baseName}.pdf`,
-  };
+  let blob = null;
+  let downloadError = null;
+  try {
+    blob = await fetchDriveFile(pdf.id);
+  } catch (error) {
+    console.error("Timesheet PDF was saved but could not be downloaded", error);
+    downloadError = error.message || "Download failed";
+  }
+  return { sheet: updated, blob, downloadError, fileName: `${baseName}.pdf` };
 }
 
 const TAB = { quote: "Quotes", invoice: "Invoices" };
@@ -613,8 +630,42 @@ async function generateFiles(data) {
   const html = buildDocumentHtml(data, ctx.company);
   const baseName = `${data.number} — ${data.client.name || "Client"}`;
   const doc = await uploadHtmlAsDoc(baseName, html, ctx.folderId);
-  const pdf = await exportDocAsPdf(doc.id, baseName + ".pdf", ctx.folderId);
-  return { doc, pdf };
+  try {
+    const pdf = await exportDocAsPdf(doc.id, baseName + ".pdf", ctx.folderId);
+    return { doc, pdf };
+  } catch (error) {
+    try { await trashFile(doc.id); } catch (cleanupError) {
+      console.warn("Could not clean up generated Doc after PDF failure", cleanupError);
+    }
+    throw error;
+  }
+}
+
+async function cleanupGeneratedFiles(doc, pdf) {
+  for (const file of [doc, pdf]) {
+    if (!file?.id) continue;
+    try { await trashFile(file.id); } catch (error) {
+      console.warn("Could not clean up generated file", error);
+    }
+  }
+}
+
+async function generatedLinksCommitted(type, number, docLink, pdfLink) {
+  const rows = await readRows(ctx.sheetId, TAB[type]);
+  const header = rows[0] || [];
+  const docIndex = header.indexOf("DocLink");
+  const pdfIndex = header.indexOf("PdfLink");
+  return rows.slice(1).some((row) =>
+    (row[0] || "").trim() === number
+    && row[docIndex] === docLink
+    && row[pdfIndex] === pdfLink);
+}
+
+async function assertNumberAvailable(data) {
+  const rows = await readRows(ctx.sheetId, TAB[data.type]);
+  if (rows.slice(1).some((row) => (row[0] || "").trim() === data.number)) {
+    throw new Error(`${data.number} is already in use. Reopen the form to assign a new number.`);
+  }
 }
 
 // Build the register row (array) for a quote or invoice.
@@ -639,10 +690,29 @@ function rowFor(data, totals, docLink, pdfLink) {
 }
 
 export async function saveDocument(data) {
+  if (!data.number) throw new Error("A document number is required.");
+  await assertNumberAvailable(data);
   const totals = computeTotals(data.lineItems);
   const { doc, pdf } = await generateFiles(data);
-  await appendRow(ctx.sheetId, TAB[data.type], rowFor(data, totals, doc.webViewLink, pdf.webViewLink));
-  return { docLink: doc.webViewLink, pdfLink: pdf.webViewLink, number: data.number };
+  const result = { docLink: doc.webViewLink, pdfLink: pdf.webViewLink, number: data.number };
+  try {
+    await appendRow(ctx.sheetId, TAB[data.type], rowFor(data, totals, result.docLink, result.pdfLink));
+  } catch (writeError) {
+    try {
+      if (await generatedLinksCommitted(data.type, data.number, result.docLink, result.pdfLink)) {
+        return result;
+      }
+    } catch (reconcileError) {
+      console.error("Could not reconcile an ambiguous document save", reconcileError);
+      throw new Error(
+        `Google did not confirm whether ${data.number} was saved. Refresh the register before retrying.`,
+        { cause: writeError },
+      );
+    }
+    await cleanupGeneratedFiles(doc, pdf);
+    throw writeError;
+  }
+  return result;
 }
 
 // --- edit an existing quote/invoice ---------------------------------------
@@ -664,21 +734,37 @@ export async function updateDocument(data) {
   const totals = computeTotals(data.lineItems);
   const { doc, pdf } = await generateFiles(data);
 
-  // Trash the previous Doc + PDF.
-  for (const col of ["DocLink", "PdfLink"]) {
-    const id = fileIdFromLink(getCol(col));
-    if (id) { try { await trashFile(id); } catch (e) { console.warn("Could not trash old file", e); } }
-  }
-
   // Preserve status/workflow columns that aren't edited on the form.
   const merged = data.type === "quote"
     ? { ...data, status: getCol("Status") || data.status, convertedTo: getCol("Converted to Inv.") }
     : { ...data, status: getCol("Status") || data.status, datePaid: getCol("Date Paid"), received: getCol("Received") };
 
   const row = rowFor(merged, totals, doc.webViewLink, pdf.webViewLink);
-  const lastCol = String.fromCharCode(64 + row.length); // 15→O (quote), 17→Q (invoice)
+  const lastCol = columnLetter(row.length - 1);
   const sheetRow = idx + 1;
-  await updateValues(ctx.sheetId, `${tab}!A${sheetRow}:${lastCol}${sheetRow}`, [row]);
+  try {
+    await updateValues(ctx.sheetId, `${tab}!A${sheetRow}:${lastCol}${sheetRow}`, [row]);
+  } catch (writeError) {
+    try {
+      if (!await generatedLinksCommitted(data.type, data.number, doc.webViewLink, pdf.webViewLink)) {
+        await cleanupGeneratedFiles(doc, pdf);
+        throw writeError;
+      }
+    } catch (reconcileError) {
+      if (reconcileError === writeError) throw writeError;
+      console.error("Could not reconcile an ambiguous document update", reconcileError);
+      throw new Error(
+        `Google did not confirm whether ${data.number} was updated. Refresh the register before retrying.`,
+        { cause: writeError },
+      );
+    }
+  }
+
+  // The row now references the replacement files; retiring old files is safe.
+  for (const col of ["DocLink", "PdfLink"]) {
+    const id = fileIdFromLink(getCol(col));
+    if (id) { try { await trashFile(id); } catch (e) { console.warn("Could not trash old file", e); } }
+  }
 
   return { docLink: doc.webViewLink, pdfLink: pdf.webViewLink, number: data.number };
 }
@@ -783,16 +869,6 @@ async function setDeletedState(type, number, deleted) {
   const existing = rows[idx];
   const getCol = (name) => existing[header.indexOf(name)] || "";
 
-  // Move the files.
-  const deletedFolderId = await ensureDeletedFolder();
-  const [addParent, removeParent] = deleted
-    ? [deletedFolderId, ctx.folderId]
-    : [ctx.folderId, deletedFolderId];
-  for (const col of ["DocLink", "PdfLink"]) {
-    const id = fileIdFromLink(getCol(col));
-    if (id) { try { await moveFile(id, addParent, removeParent); } catch (e) { console.warn("Could not move file", e); } }
-  }
-
   // Update the deleted flag inside DataJSON (keeps everything else intact).
   let data = {};
   try { data = JSON.parse(getCol("DataJSON") || "{}"); } catch {}
@@ -800,7 +876,35 @@ async function setDeletedState(type, number, deleted) {
   else { delete data.deleted; delete data.deletedAt; }
 
   const col = columnLetter(header.indexOf("DataJSON"));
-  await updateValues(ctx.sheetId, `${tab}!${col}${idx + 1}`, [[JSON.stringify(data)]]);
+  const dataRange = `${tab}!${col}${idx + 1}`;
+
+  // A delete commits its tombstone before moving artifacts, so a file-move
+  // failure cannot leave an apparently active row with missing files.
+  if (deleted) {
+    await updateValues(ctx.sheetId, dataRange, [[JSON.stringify(data)]]);
+  }
+
+  const deletedFolderId = await ensureDeletedFolder();
+  const [addParent, removeParent] = deleted
+    ? [deletedFolderId, ctx.folderId]
+    : [ctx.folderId, deletedFolderId];
+  try {
+    for (const linkCol of ["DocLink", "PdfLink"]) {
+      const id = fileIdFromLink(getCol(linkCol));
+      if (id) await moveFile(id, addParent, removeParent);
+    }
+  } catch (error) {
+    const state = deleted ? "marked deleted" : "kept deleted";
+    throw new Error(
+      `The record was ${state}, but one or more Drive files could not be moved. Retry from Deleted documents.`,
+      { cause: error },
+    );
+  }
+
+  // A restore becomes visible only after its artifacts have returned.
+  if (!deleted) {
+    await updateValues(ctx.sheetId, dataRange, [[JSON.stringify(data)]]);
+  }
 }
 
 // Soft-delete: hide from the interface, move files to the Deleted folder.

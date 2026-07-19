@@ -1,5 +1,7 @@
 import { archiveWorker, listWorkers, saveWorker } from "./store.js";
 import { withLoading } from "./ui.js";
+import { guardForm } from "./navigation.js";
+import { beginRender } from "./rendering.js";
 
 const escH = (value) => String(value ?? "").replace(/[<>&]/g, (c) =>
   ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
@@ -7,8 +9,10 @@ const escA = (value) => escH(value).replace(/"/g, "&quot;");
 const fullName = (worker) => `${worker?.firstName || ""} ${worker?.lastName || ""}`.trim();
 
 export async function renderWorkers(container) {
+  const isCurrent = beginRender(container);
   container.innerHTML = `<p class="muted">Loading workers…</p>`;
   const workers = await listWorkers({ includeArchived: true });
+  if (!isCurrent()) return;
   container.innerHTML = `
     <div class="page-head">
       <div>
@@ -64,8 +68,10 @@ function workerRow(worker) {
 }
 
 export async function renderWorkerDetail(container, workerId) {
+  const isCurrent = beginRender(container);
   container.innerHTML = `<p class="muted">Loading worker…</p>`;
   const workers = await listWorkers({ includeArchived: true });
+  if (!isCurrent()) return;
   const worker = workers.find((item) => item.id === workerId);
   if (!worker) return renderWorkers(container);
 
@@ -127,11 +133,14 @@ function renderWorkerForm(container, worker = null, onCancel = null, onSaved = n
       <div class="save-status" id="worker-status"></div>
     </form>`;
 
+  const form = container.querySelector("#worker-form");
+  const formGuard = guardForm(form, {
+    message: "Discard the unsaved worker changes?",
+  });
   container.querySelector("#worker-cancel").addEventListener("click", () =>
-    onCancel ? onCancel() : renderWorkers(container));
-  container.querySelector("#worker-form").addEventListener("submit", async (event) => {
+    formGuard.leave(() => onCancel ? onCancel() : renderWorkers(container)));
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const form = event.currentTarget;
     const button = container.querySelector("#worker-save");
     const status = container.querySelector("#worker-status");
     button.disabled = true;
@@ -143,7 +152,9 @@ function renderWorkerForm(container, worker = null, onCancel = null, onSaved = n
         mobile: form.elements.mobile.value,
         status: form.elements.status.value,
       }));
-      if (onSaved) onSaved(saved);
+      formGuard.markClean();
+      formGuard.dispose();
+      if (onSaved) await onSaved(saved);
       else await renderWorkers(container);
     } catch (error) {
       console.error(error);

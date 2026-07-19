@@ -16,35 +16,71 @@ import { withLoading } from "./ui.js";
 import { renderJobs } from "./jobs.js";
 import { renderAllTimesheets } from "./timesheets.js";
 import { renderWorkers } from "./workers.js";
+import { escapeAttr as escA, escapeHtml as escH, safeGoogleUrl } from "./security.js";
+import { confirmNavigation, discardAllFormGuards, guardForm } from "./navigation.js";
+import { beginRender } from "./rendering.js";
 
 const el = (id) => document.getElementById(id);
 const state = { user: null, highlight: null };
 const num = (v) => Number(v) || 0;
+let viewRequest = 0;
 
 // --- view switching --------------------------------------------------------
 function canLeaveCurrentView() {
-  const guard = window.__quoteMeNavigationGuard;
-  if (typeof guard === "function" && !guard()) return false;
-  window.__quoteMeNavigationGuard = null;
+  if (!confirmNavigation()) return false;
+  discardAllFormGuards();
   return true;
 }
 
-function show(view) {
-  if (!canLeaveCurrentView()) return;
+async function show(view) {
+  if (!canLeaveCurrentView()) return false;
+  const request = ++viewRequest;
   document.querySelectorAll(".view").forEach((v) => (v.hidden = true));
-  el(`view-${view}`).hidden = false;
+  const container = el(`view-${view}`);
+  if (!container) return false;
+  container.hidden = false;
   const activeTab = view;
-  document.querySelectorAll("#tabs button").forEach((b) =>
-    b.classList.toggle("is-active", b.dataset.view === activeTab)
-  );
-  if (view === "dashboard") renderDashboard();
-  if (view === "quotes") renderQuotes();
-  if (view === "invoices") renderInvoices();
-  if (view === "jobs") renderJobs(el("view-jobs"));
-  if (view === "workers") renderWorkers(el("view-workers"));
-  if (view === "timesheets") renderAllTimesheets(el("view-timesheets"));
-  if (view === "business") renderBusiness(false);
-  if (view === "deleted") renderDeleted();
+  document.querySelectorAll("#tabs button").forEach((button) => {
+    const active = button.dataset.view === activeTab;
+    button.classList.toggle("is-active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  const renderer = {
+    dashboard: renderDashboard,
+    quotes: renderQuotes,
+    invoices: renderInvoices,
+    jobs: () => renderJobs(el("view-jobs")),
+    workers: () => renderWorkers(el("view-workers")),
+    timesheets: () => renderAllTimesheets(el("view-timesheets")),
+    business: () => renderBusiness(false),
+    deleted: renderDeleted,
+  }[view];
+  if (!renderer) return true;
+  try {
+    await renderer();
+    return true;
+  } catch (error) {
+    console.error(`Could not render ${view}`, error);
+    if (request === viewRequest) renderViewError(container, view, error);
+    return false;
+  }
+}
+
+function renderViewError(container, view, error) {
+  container.replaceChildren();
+  const panel = document.createElement("div");
+  panel.className = "empty-state";
+  const heading = document.createElement("h3");
+  heading.textContent = "This page could not be loaded";
+  const detail = document.createElement("p");
+  detail.textContent = error?.message || "An unexpected Google API error occurred.";
+  const retry = document.createElement("button");
+  retry.className = "btn btn-primary";
+  retry.textContent = "Try again";
+  retry.addEventListener("click", () => show(view));
+  panel.append(heading, detail, retry);
+  container.appendChild(panel);
 }
 
 function setSignedInUI(signedIn) {
@@ -64,7 +100,7 @@ async function enterApp() {
     el("view-dashboard").innerHTML = "";
     await initStore();
     applyBranding();
-    show("dashboard");
+    await show("dashboard");
   });
 }
 
@@ -95,12 +131,14 @@ async function tryAutoSignIn() {
 // --- dashboard -------------------------------------------------------------
 async function renderDashboard() {
   const c = el("view-dashboard");
+  const isCurrent = beginRender(c);
   c.innerHTML = `<p class="muted">Loading…</p>`;
   const [quotes, invoices, jobs] = await Promise.all([
     listQuotes(),
     listInvoices(),
     listJobs({ includeArchived: true }),
   ]);
+  if (!isCurrent()) return;
   const activeJobs = jobs.filter((job) => (job.status || "Active") === "Active");
   const completedJobs = jobs.filter((job) => job.status === "Complete");
 
@@ -161,7 +199,7 @@ function setupBanner() {
 }
 
 function statCard(label, value, tone = "") {
-  return `<div class="card stat ${tone}"><div class="stat-val">${value}</div><div class="stat-lbl">${label}</div></div>`;
+  return `<div class="card stat ${escA(tone)}"><div class="stat-val">${escH(value)}</div><div class="stat-lbl">${escH(label)}</div></div>`;
 }
 
 function recentList(quotes, invoices) {
@@ -171,9 +209,9 @@ function recentList(quotes, invoices) {
   ].reverse().slice(0, 8);
   if (!rows.length) return `<p class="muted">Nothing yet — create your first quote or invoice above.</p>`;
   return `<table class="list"><tbody>${rows.map((r) => `
-    <tr><td>${r.kind}</td>
-        <td><a href="#" class="link-num" data-goto="${r.kind.toLowerCase()}" data-number="${r.n}">${r.n}</a></td>
-        <td>${r.who || ""}</td>
+    <tr><td>${escH(r.kind)}</td>
+        <td><a href="#" class="link-num" data-goto="${escA(r.kind.toLowerCase())}" data-number="${escA(r.n)}">${escH(r.n)}</a></td>
+        <td>${escH(r.who)}</td>
         <td class="num">${money(r.t)}</td><td>${statusPill(r.s)}</td></tr>`).join("")}
   </tbody></table>`;
 }
@@ -187,7 +225,8 @@ function gotoRecord(kind, number) {
 // After a register view renders, flash + scroll to any pending target row.
 function applyHighlight(container) {
   if (!state.highlight) return;
-  const tr = container.querySelector(`tr[data-num="${state.highlight}"]`);
+  const tr = [...container.querySelectorAll("tr[data-num]")]
+    .find((row) => row.dataset.num === state.highlight);
   state.highlight = null;
   if (tr) {
     tr.classList.add("row-flash");
@@ -199,8 +238,10 @@ function applyHighlight(container) {
 // --- quotes view -----------------------------------------------------------
 async function renderQuotes() {
   const c = el("view-quotes");
+  const isCurrent = beginRender(c);
   c.innerHTML = `<p class="muted">Loading…</p>`;
   const quotes = await listQuotes();
+  if (!isCurrent()) return;
   c.innerHTML = `
     <div class="page-head">
       <h2>Quotes</h2>
@@ -224,12 +265,19 @@ async function renderQuotes() {
     b.addEventListener("click", () => convertQuote(b.dataset.convert, quotes))
   );
   c.querySelectorAll("[data-qstatus]").forEach((sel) =>
-    sel.addEventListener("change", () =>
-      withLoading("Updating…", async () => {
+    sel.addEventListener("change", async () => {
+      try {
+        await withLoading("Updating…", async () => {
         await setQuoteStatus(sel.dataset.qstatus, sel.value);
         await renderQuotes();
-      })
-    )
+        });
+      } catch (error) {
+        console.error(error);
+        alert("Status update failed: " + (error.message || "unknown error"));
+        await renderQuotes().catch((renderError) =>
+          renderViewError(c, "quotes", renderError));
+      }
+    })
   );
   wireDelete(c, "quote", renderQuotes);
   c.querySelectorAll("[data-download]").forEach((b) =>
@@ -245,13 +293,13 @@ async function renderQuotes() {
 function quoteRow(q) {
   const no = q["Quote No."];
   const converted = q["Converted to Inv."];
-  return `<tr data-num="${no}">
-    <td><strong>${no}</strong></td>
-    <td>${q["Date Issued"]}</td>
-    <td>${q.Client || ""}</td>
-    <td>${q["Job / Site"] || ""}</td>
+  return `<tr data-num="${escA(no)}">
+    <td><strong>${escH(no)}</strong></td>
+    <td>${escH(q["Date Issued"])}</td>
+    <td>${escH(q.Client)}</td>
+    <td>${escH(q["Job / Site"])}</td>
     <td class="num">${money(q["Total (inc GST)"])}</td>
-    <td>${q["Valid Until"] || ""}</td>
+    <td>${escH(q["Valid Until"])}</td>
     <td>${converted ? statusPill("Accepted") : statusSelect(no, q.Status, ["Pending", "Accepted", "Declined"], "qstatus")}</td>
     <td class="row-actions">${actionsMenu(q, "quote")}</td>
   </tr>`;
@@ -260,8 +308,10 @@ function quoteRow(q) {
 // --- invoices view ---------------------------------------------------------
 async function renderInvoices() {
   const c = el("view-invoices");
+  const isCurrent = beginRender(c);
   c.innerHTML = `<p class="muted">Loading…</p>`;
   const invoices = await listInvoices();
+  if (!isCurrent()) return;
   c.innerHTML = `
     <div class="page-head">
       <h2>Invoices</h2>
@@ -283,16 +333,23 @@ async function renderInvoices() {
   );
   wireDelete(c, "invoice", renderInvoices);
   c.querySelectorAll("[data-istatus]").forEach((sel) =>
-    sel.addEventListener("change", () =>
-      withLoading("Updating…", async () => {
+    sel.addEventListener("change", async () => {
+      try {
+        await withLoading("Updating…", async () => {
         const no = sel.dataset.istatus;
         const paid = sel.value === "Paid";
         await setInvoiceStatus(no, sel.value, paid
           ? { datePaid: new Date().toISOString().slice(0, 10), received: sel.dataset.total }
           : {});
         await renderInvoices();
-      })
-    )
+        });
+      } catch (error) {
+        console.error(error);
+        alert("Status update failed: " + (error.message || "unknown error"));
+        await renderInvoices().catch((renderError) =>
+          renderViewError(c, "invoices", renderError));
+      }
+    })
   );
   c.querySelectorAll("[data-download]").forEach((b) =>
     b.addEventListener("click", () => downloadPdfFlow("invoice", b.dataset.download, invoices))
@@ -306,13 +363,13 @@ async function renderInvoices() {
 
 function invoiceRow(i) {
   const no = i["Invoice No."];
-  return `<tr data-num="${no}">
-    <td><strong>${no}</strong></td>
-    <td>${i["Date Issued"]}</td>
-    <td>${i.Client || ""}</td>
-    <td>${i["Job / Site"] || ""}</td>
+  return `<tr data-num="${escA(no)}">
+    <td><strong>${escH(no)}</strong></td>
+    <td>${escH(i["Date Issued"])}</td>
+    <td>${escH(i.Client)}</td>
+    <td>${escH(i["Job / Site"])}</td>
     <td class="num">${money(i["Total (inc GST)"])}</td>
-    <td>${i["Due Date"] || ""}</td>
+    <td>${escH(i["Due Date"])}</td>
     <td>${statusSelect(no, i.Status, ["Unpaid", "Paid", "Overdue"], "istatus", i["Total (inc GST)"])}</td>
     <td class="row-actions">${actionsMenu(i, "invoice")}</td>
   </tr>`;
@@ -333,7 +390,12 @@ function wireDelete(container, type, rerender) {
       } catch (err) {
         console.error(err);
         alert("Delete failed: " + (err.message || "unknown error"));
-        b.disabled = false; b.textContent = "Delete";
+        try {
+          await rerender();
+        } catch (renderError) {
+          console.error(renderError);
+          b.disabled = false; b.textContent = "Delete";
+        }
       }
     })
   );
@@ -345,18 +407,20 @@ function wireDelete(container, type, rerender) {
 function actionsMenu(rec, type) {
   const no = type === "invoice" ? rec["Invoice No."] : rec["Quote No."];
   const items = [];
-  if (rec.DocLink) items.push(`<a href="${rec.DocLink}" target="_blank">Open Doc</a>`);
-  if (rec.PdfLink) items.push(`<a href="${rec.PdfLink}" target="_blank">Open PDF</a>`);
-  if (rec.PdfLink) items.push(`<button data-download="${no}">Download PDF</button>`);
-  if (rec.PdfLink) items.push(`<button data-email="${no}">Email PDF…</button>`);
-  items.push(`<button data-edit="${no}">Edit</button>`);
+  const docLink = safeGoogleUrl(rec.DocLink);
+  const pdfLink = safeGoogleUrl(rec.PdfLink);
+  if (docLink) items.push(`<a href="${escA(docLink)}" target="_blank" rel="noopener noreferrer">Open Doc</a>`);
+  if (pdfLink) items.push(`<a href="${escA(pdfLink)}" target="_blank" rel="noopener noreferrer">Open PDF</a>`);
+  if (pdfLink) items.push(`<button data-download="${escA(no)}">Download PDF</button>`);
+  if (pdfLink) items.push(`<button data-email="${escA(no)}">Email PDF…</button>`);
+  items.push(`<button data-edit="${escA(no)}">Edit</button>`);
   if (type === "quote") {
     const converted = rec["Converted to Inv."];
     items.push(converted
-      ? `<span class="menu-note">Converted → ${converted}</span>`
-      : `<button data-convert="${no}">Convert to invoice</button>`);
+      ? `<span class="menu-note">Converted → ${escH(converted)}</span>`
+      : `<button data-convert="${escA(no)}">Convert to invoice</button>`);
   }
-  items.push(`<button class="danger" data-del="${no}">Delete</button>`);
+  items.push(`<button class="danger" data-del="${escA(no)}">Delete</button>`);
   return `<details class="actions-menu">
     <summary class="btn btn-ghost small">Actions ▾</summary>
     <div class="menu">${items.join("")}</div>
@@ -376,11 +440,11 @@ function statusPill(s) {
   const tone = { Paid: "ok", Accepted: "ok", Received: "ok",
                  Overdue: "bad", Declined: "bad",
                  Pending: "warn", Unpaid: "warn" }[s] || "";
-  return `<span class="pill ${tone}">${s || "—"}</span>`;
+  return `<span class="pill ${escA(tone)}">${escH(s || "—")}</span>`;
 }
 function statusSelect(no, current, options, dataAttr, total = "") {
-  return `<select class="status-select" data-${dataAttr}="${no}" data-total="${total}">
-    ${options.map((o) => `<option ${o === current ? "selected" : ""}>${o}</option>`).join("")}
+  return `<select class="status-select" data-${dataAttr}="${escA(no)}" data-total="${escA(total)}">
+    ${options.map((o) => `<option ${o === current ? "selected" : ""}>${escH(o)}</option>`).join("")}
   </select>`;
 }
 
@@ -388,6 +452,7 @@ function statusSelect(no, current, options, dataAttr, total = "") {
 function openForm(type, { prefill = null, editMode = false, afterSave = null } = {}) {
   const view = type === "invoice" ? "invoices" : "quotes";
   const c = el(`view-${view}`);
+  beginRender(c); // invalidate any register request still loading for this view
   document.querySelectorAll(".view").forEach((v) => (v.hidden = true));
   c.hidden = false;
   renderForm(type, c, {
@@ -461,7 +526,7 @@ function openEmailModal({ number, defaultSubject, defaultBody, onSend }) {
   overlay.className = "modal-overlay";
   overlay.innerHTML = `
     <div class="modal">
-      <h3>Email PDF — ${number}</h3>
+      <h3>Email PDF — ${escH(number)}</h3>
       <label class="f"><span>To</span>
         <input type="email" id="em-to" placeholder="client@example.com" autocomplete="off"/></label>
       <label class="f"><span>Subject</span><input id="em-subject" value="${escA(defaultSubject)}"/></label>
@@ -474,8 +539,16 @@ function openEmailModal({ number, defaultSubject, defaultBody, onSend }) {
     </div>`;
   document.body.appendChild(overlay);
 
-  const close = () => overlay.remove();
   const $ = (id) => overlay.querySelector(id);
+  const formGuard = guardForm(overlay.querySelector(".modal"), {
+    message: "Discard this unsent email?",
+    onDiscard: () => overlay.remove(),
+  });
+  const forceClose = () => {
+    formGuard.dispose();
+    overlay.remove();
+  };
+  const close = () => formGuard.leave(() => overlay.remove());
   overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
   $("#em-cancel").addEventListener("click", close);
   $("#em-to").focus();
@@ -491,7 +564,8 @@ function openEmailModal({ number, defaultSubject, defaultBody, onSend }) {
       await withLoading("Sending email…", () =>
         onSend({ to, subject: $("#em-subject").value.trim(), body: $("#em-body").value }));
       status.textContent = "✅ Sent!";
-      setTimeout(close, 1000);
+      formGuard.markClean();
+      setTimeout(forceClose, 1000);
     } catch (err) {
       console.error(err);
       status.textContent = "⚠️ " + (err.message || "Send failed");
@@ -507,28 +581,28 @@ function setPath(o, p, v) {
   while (parts.length > 1) { const k = parts.shift(); cur = cur[k] = cur[k] || {}; }
   cur[parts[0]] = v;
 }
-const escH = (s) => String(s ?? "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
-const escA = (s) => String(s ?? "").replace(/"/g, "&quot;");
-
 async function renderBusiness(editing = false) {
   const c = el("view-business");
+  const isCurrent = beginRender(c);
   if (!editing) {
     c.innerHTML = `<p class="muted">Loading…</p>`;
     try { await refreshCompany(); } catch (e) { console.error(e); }
+    if (!isCurrent()) return;
     applyBranding();
   }
   const co = getCompany() || {};
 
   if (editing) return renderBusinessEdit(c, co);
 
-  const sheetUrl = await businessSheetUrl();
+  const sheetUrl = safeGoogleUrl(await businessSheetUrl());
+  if (!isCurrent()) return;
   c.innerHTML = `
     <div class="page-head">
       <h2>Business details</h2>
       <div class="head-actions"><button class="btn btn-primary" id="biz-edit">Edit</button></div>
     </div>
     <p class="muted">These appear on every quote and invoice.
-      <a href="${sheetUrl}" target="_blank">Open the source sheet</a>.</p>
+      ${sheetUrl ? `<a href="${escA(sheetUrl)}" target="_blank" rel="noopener noreferrer">Open the source sheet</a>.` : ""}</p>
     <div class="detail-list">
       ${BUSINESS_FIELDS.map((f) => {
         const v = getPath(co, f.key);
@@ -538,7 +612,8 @@ async function renderBusiness(editing = false) {
         </div>`;
       }).join("")}
     </div>`;
-  el("biz-edit").addEventListener("click", () => renderBusiness(true));
+  el("biz-edit").addEventListener("click", () =>
+    renderBusiness(true).catch((error) => renderViewError(c, "business", error)));
 }
 
 function renderBusinessEdit(c, co) {
@@ -560,8 +635,14 @@ function renderBusinessEdit(c, co) {
       <div class="save-status" id="biz-status"></div>
     </form>`;
 
-  el("biz-cancel").addEventListener("click", () => renderBusiness(false));
-  el("biz-form").addEventListener("submit", async (e) => {
+  const form = el("biz-form");
+  const formGuard = guardForm(form, {
+    message: "Discard the unsaved business detail changes?",
+  });
+  el("biz-cancel").addEventListener("click", () =>
+    formGuard.leave(() => renderBusiness(false).catch((error) =>
+      renderViewError(c, "business", error))));
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const btn = el("biz-save");
     const status = el("biz-status");
@@ -571,8 +652,10 @@ function renderBusinessEdit(c, co) {
     for (const f of BUSINESS_FIELDS) setPath(company, f.key, e.target.elements[f.key].value.trim());
     try {
       await withLoading("Saving…", () => saveBusinessDetails(company));
+      formGuard.markClean();
+      formGuard.dispose();
       applyBranding();
-      renderBusiness(false);
+      await renderBusiness(false);
     } catch (err) {
       console.error(err);
       status.textContent = "⚠️ " + (err.message || "Save failed");
@@ -584,8 +667,10 @@ function renderBusinessEdit(c, co) {
 // --- deleted documents page ------------------------------------------------
 async function renderDeleted() {
   const c = el("view-deleted");
+  const isCurrent = beginRender(c);
   c.innerHTML = `<p class="muted">Loading…</p>`;
   const items = await listDeleted();
+  if (!isCurrent()) return;
   c.innerHTML = `
     <div class="page-head"><h2>Deleted documents</h2></div>
     <p class="muted">Hidden from your registers; their files live in the "Deleted" folder in Drive.
@@ -621,18 +706,20 @@ function deletedRow(it) {
   const no = it.no;
   const when = it._data?.deletedAt ? new Date(it._data.deletedAt).toLocaleDateString() : "";
   const links = [];
-  if (it.DocLink) links.push(`<a class="small" href="${it.DocLink}" target="_blank">Open Doc</a>`);
-  if (it.PdfLink) links.push(`<a class="small" href="${it.PdfLink}" target="_blank">Open PDF</a>`);
+  const docLink = safeGoogleUrl(it.DocLink);
+  const pdfLink = safeGoogleUrl(it.PdfLink);
+  if (docLink) links.push(`<a class="small" href="${escA(docLink)}" target="_blank" rel="noopener noreferrer">Open Doc</a>`);
+  if (pdfLink) links.push(`<a class="small" href="${escA(pdfLink)}" target="_blank" rel="noopener noreferrer">Open PDF</a>`);
   return `<tr>
     <td>${it.type === "invoice" ? "Invoice" : "Quote"}</td>
-    <td><strong>${no}</strong></td>
-    <td>${it.Client || ""}</td>
-    <td>${it["Job / Site"] || ""}</td>
+    <td><strong>${escH(no)}</strong></td>
+    <td>${escH(it.Client)}</td>
+    <td>${escH(it["Job / Site"])}</td>
     <td class="num">${money(it["Total (inc GST)"])}</td>
-    <td>${when}</td>
+    <td>${escH(when)}</td>
     <td class="row-actions">
       ${links.join(" · ")}
-      <button class="btn btn-ghost small" data-restore="${no}" data-type="${it.type}">Restore</button>
+      <button class="btn btn-ghost small" data-restore="${escA(no)}" data-type="${escA(it.type)}">Restore</button>
     </td>
   </tr>`;
 }
@@ -681,4 +768,8 @@ async function boot() {
   if (!resumed) show("welcome");
 }
 
-boot();
+boot().catch((error) => {
+  console.error("QuoteMe failed to start", error);
+  const welcome = el("view-welcome");
+  if (welcome) renderViewError(welcome, "welcome", error);
+});

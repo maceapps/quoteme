@@ -1,14 +1,18 @@
 import { deleteJob, listInvoices, listJobs, listQuotes, saveJob } from "./store.js";
 import { withLoading } from "./ui.js";
 import { money } from "./documents.js";
+import { guardForm } from "./navigation.js";
+import { beginRender } from "./rendering.js";
 
 const escH = (value) => String(value ?? "").replace(/[<>&]/g, (c) =>
   ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
 const escA = (value) => escH(value).replace(/"/g, "&quot;");
 
 export async function renderJobs(container) {
+  const isCurrent = beginRender(container);
   container.innerHTML = `<p class="muted">Loading jobs…</p>`;
   const jobs = await listJobs({ includeArchived: true });
+  if (!isCurrent()) return;
   container.innerHTML = `
     <div class="page-head">
       <div>
@@ -96,12 +100,14 @@ function jobActions(job) {
 }
 
 export async function renderJobDetail(container, jobId) {
+  const isCurrent = beginRender(container);
   container.innerHTML = `<p class="muted">Loading job…</p>`;
   const [jobs, quotes, invoices] = await Promise.all([
     listJobs({ includeArchived: true }),
     listQuotes(),
     listInvoices(),
   ]);
+  if (!isCurrent()) return;
   const job = jobs.find((item) => item.id === jobId);
   if (!job) return renderJobs(container);
   const activity = [
@@ -224,11 +230,14 @@ function renderJobForm(container, job = null, onCancel = null, onSaved = null) {
       <div class="save-status" id="job-status"></div>
     </form>`;
 
+  const form = container.querySelector("#job-form");
+  const formGuard = guardForm(form, {
+    message: "Discard the unsaved job changes?",
+  });
   container.querySelector("#job-cancel").addEventListener("click", () =>
-    onCancel ? onCancel() : renderJobs(container));
-  container.querySelector("#job-form").addEventListener("submit", async (event) => {
+    formGuard.leave(() => onCancel ? onCancel() : renderJobs(container)));
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const form = event.currentTarget;
     const button = container.querySelector("#job-save");
     const status = container.querySelector("#job-status");
     const value = (name) => form.elements[name].value.trim();
@@ -244,7 +253,9 @@ function renderJobForm(container, job = null, onCancel = null, onSaved = null) {
           suburb: value("suburb"), phone: value("phone"),
         },
       }));
-      if (onSaved) onSaved(saved);
+      formGuard.markClean();
+      formGuard.dispose();
+      if (onSaved) await onSaved(saved);
       else await renderJobs(container);
     } catch (error) {
       console.error(error);

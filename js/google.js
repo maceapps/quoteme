@@ -17,18 +17,25 @@ let tokenClient = null;
 let gapiReady = false;
 let accessToken = null;
 
-// Persist the short-lived access token so page reloads within its ~1h life
-// resume silently (no click, no popup). Cleared on sign-out / expiry.
+// Keep the short-lived token only for this browser tab. sessionStorage permits
+// reloads but does not expose the bearer token to other tabs or future sessions.
 const TOKEN_KEY = "qm_token";
+try { localStorage.removeItem(TOKEN_KEY); } catch {}
 function saveToken(resp) {
   accessToken = resp.access_token;
   gapi.client.setToken({ access_token: accessToken });
   const expiry = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
-  try { localStorage.setItem(TOKEN_KEY, JSON.stringify({ access_token: accessToken, expiry })); } catch {}
+  try {
+    sessionStorage.setItem(TOKEN_KEY, JSON.stringify({ access_token: accessToken, expiry }));
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {}
 }
 function clearToken() {
   accessToken = null;
-  try { localStorage.removeItem(TOKEN_KEY); } catch {}
+  try {
+    sessionStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(TOKEN_KEY); // remove tokens written by older releases
+  } catch {}
   if (gapiReady) gapi.client.setToken(null);
 }
 
@@ -36,7 +43,7 @@ function clearToken() {
 // usable token was restored. Keeps a 60s safety margin before expiry.
 export function restoreToken() {
   try {
-    const raw = localStorage.getItem(TOKEN_KEY);
+    const raw = sessionStorage.getItem(TOKEN_KEY);
     if (!raw) return false;
     const { access_token, expiry } = JSON.parse(raw);
     if (!access_token || Date.now() > expiry - 60000) { clearToken(); return false; }
