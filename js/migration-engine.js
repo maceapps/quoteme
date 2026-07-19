@@ -135,8 +135,14 @@ async function currentRow(operation) {
 
 async function rowState(operation, row) {
   if (!row) return "missing";
-  if (await hashRow(row) === operation.sourceHash) return "preimage";
-  if (await hashRow(row) === operation.targetHash) return "postimage";
+  const currentHash = await hashRow(row);
+  const sourceMatch = currentHash === await hashRow(operation.source);
+  const targetMatch = operation.target
+    ? currentHash === await hashRow(operation.target)
+    : false;
+  if (sourceMatch && targetMatch) return "equivalent";
+  if (sourceMatch) return "preimage";
+  if (targetMatch) return "postimage";
   return "changed";
 }
 
@@ -287,7 +293,7 @@ async function datasetShapeIssues(run, useTargets) {
       const expectedItems = allItems.filter((item) =>
         item.workbookRole === role && item.tab === tab);
       const expectedHashes = await Promise.all(expectedItems.map((item) =>
-        useTargets && item.target ? item.targetHash : item.sourceHash));
+        hashRow(useTargets && item.target ? item.target : item.source)));
       const currentHashes = await Promise.all(current.map(hashRow));
       if (expectedHashes.sort().join(":") !== currentHashes.sort().join(":")) {
         issues.push({ workbookRole: role, tab, state: "dataset-shape-changed" });
@@ -319,7 +325,7 @@ export async function applyMigration(run, { onProgress = () => {} } = {}) {
     const state = current.duplicate
       ? "duplicate"
       : await rowState(operation, current.row);
-    if (state === "postimage") {
+    if (state === "postimage" || state === "equivalent") {
       checkpoint += 1;
       continue;
     }
@@ -336,7 +342,7 @@ export async function applyMigration(run, { onProgress = () => {} } = {}) {
       [operation.target],
     );
     const written = await currentRow(operation);
-    if (await rowState(operation, written.row) !== "postimage") {
+    if (!["postimage", "equivalent"].includes(await rowState(operation, written.row))) {
       throw new Error(`Could not verify migrated row ${operation.unitId}.`);
     }
     checkpoint += 1;
@@ -373,7 +379,10 @@ export async function verifyMigration(run) {
     const state = current.duplicate
       ? "duplicate"
       : await rowState(operation, current.row);
-    if (state !== "postimage") {
+    const valid = state === "postimage"
+      || state === "equivalent"
+      || (operation.classification === "unchanged" && state === "preimage");
+    if (!valid) {
       issues.push({ unitId: operation.unitId, state });
     }
   }
@@ -416,7 +425,7 @@ export async function rollbackMigration(run, { onProgress = () => {} } = {}) {
   for (const operation of run.plan.operations) {
     const current = await currentRow(operation);
     const state = current.duplicate ? "duplicate" : await rowState(operation, current.row);
-    if (!["preimage", "postimage"].includes(state)) {
+    if (!["preimage", "postimage", "equivalent"].includes(state)) {
       throw new Error(`Rollback stopped because ${operation.unitId} changed after migration.`);
     }
   }
@@ -431,7 +440,7 @@ export async function rollbackMigration(run, { onProgress = () => {} } = {}) {
     const rows = (await readRows(workbookId(workbookRole), tab)).slice(1)
       .filter((row) => keys.has(String(row[0] || "").trim()));
     const currentHashes = (await Promise.all(rows.map(hashRow))).sort();
-    const expectedHashes = items.map((item) => item.sourceHash).sort();
+    const expectedHashes = (await Promise.all(items.map((item) => hashRow(item.source)))).sort();
     if (currentHashes.join(":") !== expectedHashes.join(":")) {
       throw new Error(`Rollback stopped because quarantined rows in ${tab} changed.`);
     }
@@ -442,7 +451,7 @@ export async function rollbackMigration(run, { onProgress = () => {} } = {}) {
     const state = current.duplicate
       ? "duplicate"
       : await rowState(operation, current.row);
-    if (state === "preimage") {
+    if (state === "preimage" || state === "equivalent") {
       checkpoint += 1;
       continue;
     }
@@ -463,7 +472,7 @@ export async function rollbackMigration(run, { onProgress = () => {} } = {}) {
       );
     }
     const restored = await currentRow(operation);
-    if (await rowState(operation, restored.row) !== "preimage") {
+    if (!["preimage", "equivalent"].includes(await rowState(operation, restored.row))) {
       throw new Error(`Could not verify rollback for ${operation.unitId}.`);
     }
     checkpoint += 1;
@@ -506,8 +515,8 @@ export async function loadMigrationRun(runId) {
   };
 }
 
-export async function resumeMigration(runId) {
-  return applyMigration(await loadMigrationRun(runId));
+export async function resumeMigration(runId, options = {}) {
+  return applyMigration(await loadMigrationRun(runId), options);
 }
 
 export async function latestMigrationRun() {

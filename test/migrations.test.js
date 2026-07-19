@@ -127,6 +127,15 @@ test("migration plan adds stable document IDs, foreign keys, and file IDs", asyn
   assert.equal((await verifyOperation(quote, quote.target)).postimage, true);
 });
 
+test("verification treats Sheets-formatted numeric metadata as equivalent", async () => {
+  const operation = {
+    source: ["INV-1"],
+    target: ["INV-1", 1, 2],
+  };
+  const state = await verifyOperation(operation, ["INV-1", "1", "2"]);
+  assert.equal(state.postimage, true);
+});
+
 test("migration planning is idempotent on its own target rows", async () => {
   const fixture = legacyFixture();
   const first = await buildMigrationPlan(fixture);

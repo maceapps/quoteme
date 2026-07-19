@@ -18,7 +18,11 @@ export async function hashValue(value) {
 }
 
 function canonicalRow(row) {
-  const values = [...(row || [])].map((value) => value ?? "");
+  const values = [...(row || [])].map((value) => {
+    if (value == null) return "";
+    if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+    return String(value);
+  });
   while (values.length && values.at(-1) === "") values.pop();
   return values;
 }
@@ -270,8 +274,8 @@ async function planDocuments(register, datasetId, migratedAt, references) {
       const recordId = entry.source[sourceIndex.get("Record ID")] || ids.get(entry.logicalKey);
       setCell(target, canonicalIndex, "DataJSON", encodeDataEnvelope(entityType, payload));
       setCell(target, canonicalIndex, "Record ID", recordId);
-      setCell(target, canonicalIndex, "Revision", Number(source.Revision) || 1);
-      setCell(target, canonicalIndex, "Row Schema", CURRENT_SCHEMA_VERSION);
+      setCell(target, canonicalIndex, "Revision", String(Number(source.Revision) || 1));
+      setCell(target, canonicalIndex, "Row Schema", String(CURRENT_SCHEMA_VERSION));
       setCell(target, canonicalIndex, "Job ID", jobId);
       setCell(target, canonicalIndex,
         tab === "Quotes" ? "Converted Invoice ID" : "Source Quote ID",
@@ -314,8 +318,8 @@ async function planTimesheetWorkbook(workbook, references) {
       const payload = { ...decoded.payload };
       const target = [...entry.source];
       target.length = canonicalHeaders.length;
-      setCell(target, canonicalIndex, "Revision", Number(source.Revision) || 1);
-      setCell(target, canonicalIndex, "Row Schema", CURRENT_SCHEMA_VERSION);
+      setCell(target, canonicalIndex, "Revision", String(Number(source.Revision) || 1));
+      setCell(target, canonicalIndex, "Row Schema", String(CURRENT_SCHEMA_VERSION));
       setCell(target, canonicalIndex, "Deleted At", source["Deleted At"] || decoded.payload.deletedAt || "");
       if (tab === "Timesheets") {
         const jobId = source["Job ID"] || payload.jobId || "";
@@ -409,7 +413,7 @@ export async function buildMigrationPlan({
 
 export async function verifyOperation(operation, currentRow) {
   return {
-    preimage: await hashRow(currentRow) === operation.sourceHash,
-    postimage: await hashRow(currentRow) === operation.targetHash,
+    preimage: await hashRow(currentRow) === await hashRow(operation.source),
+    postimage: await hashRow(currentRow) === await hashRow(operation.target),
   };
 }

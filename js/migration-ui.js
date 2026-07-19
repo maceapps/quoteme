@@ -1,9 +1,21 @@
 import { withLoading } from "./ui.js";
 import {
   applyMigration, createMigrationBackup, inspectDataset, latestMigrationRun,
-  loadMigrationRun, rollbackMigration,
+  loadMigrationRun, resumeMigration, rollbackMigration,
 } from "./migration-engine.js";
 import { escapeHtml } from "./security.js";
+
+function migrationErrorMessage(error, fallback) {
+  return (typeof error === "string" ? error : "")
+    || error?.message
+    || error?.result?.error?.message
+    || error?.error?.message
+    || error?.statusText
+    || (typeof error?.body === "string" ? (() => {
+      try { return JSON.parse(error.body)?.error?.message; } catch { return ""; }
+    })() : "")
+    || fallback;
+}
 
 export async function renderMigrationTools(container) {
   let inspection = null;
@@ -60,6 +72,11 @@ export async function renderMigrationTools(container) {
         <button class="btn btn-ghost" id="migration-dry-run">Run dry inspection</button>
         <button class="btn btn-primary" id="migration-apply"
           ${inspection && !summary.blocking ? "" : "disabled"}>Back up and apply</button>
+        ${latest && ["BACKED_UP", "APPLYING", "QUARANTINED"].includes(latest.status)
+          ? `<button class="btn btn-primary" id="migration-resume">${
+              latest.status === "QUARANTINED" ? "Re-verify migration" : "Resume migration"
+            }</button>`
+          : ""}
         ${latest && latest.status !== "ROLLED_BACK"
           ? `<button class="btn btn-ghost danger" id="migration-rollback">Rollback latest run</button>`
           : ""}
@@ -77,7 +94,7 @@ export async function renderMigrationTools(container) {
         render();
       } catch (error) {
         console.error(error);
-        status.textContent = "⚠️ " + (error.message || "Inspection failed");
+        status.textContent = "⚠️ " + migrationErrorMessage(error, "Inspection failed");
       }
     });
 
@@ -106,7 +123,31 @@ export async function renderMigrationTools(container) {
             : "⚠️ Safe rows were migrated; ambiguous rows require review.";
       } catch (error) {
         console.error(error);
-        status.textContent = "⚠️ " + (error.message || "Migration failed");
+        latest = await latestMigrationRun().catch(() => latest);
+        render();
+        container.querySelector("#migration-status").textContent =
+          "⚠️ " + migrationErrorMessage(error, "Migration failed");
+      }
+    });
+
+    container.querySelector("#migration-resume")?.addEventListener("click", async () => {
+      const status = container.querySelector("#migration-status");
+      try {
+        const result = await withLoading("Resuming migration…", () =>
+          resumeMigration(latest.runId, {
+            onProgress: ({ checkpoint, total }) => {
+              status.textContent = `Migrating row ${checkpoint} of ${total}…`;
+            },
+          }));
+        latest = await latestMigrationRun();
+        render();
+        container.querySelector("#migration-status").textContent =
+          result.status === "VERIFIED"
+            ? "✅ Migration verified successfully."
+            : "⚠️ Safe rows were migrated; ambiguous rows require review.";
+      } catch (error) {
+        console.error(error);
+        status.textContent = "⚠️ " + migrationErrorMessage(error, "Resume failed");
       }
     });
 
@@ -128,7 +169,7 @@ export async function renderMigrationTools(container) {
         container.querySelector("#migration-status").textContent = "✅ Migration rolled back.";
       } catch (error) {
         console.error(error);
-        status.textContent = "⚠️ " + (error.message || "Rollback failed");
+        status.textContent = "⚠️ " + migrationErrorMessage(error, "Rollback failed");
       }
     });
   };
