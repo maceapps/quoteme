@@ -21,7 +21,10 @@ export function money(n) {
 
 export function fmtDate(iso) {
   if (!iso) return "—";
-  const d = new Date(iso);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  const d = match
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12)
+    : new Date(iso);
   if (isNaN(d)) return iso;
   const p = (x) => String(x).padStart(2, "0");
   return `${p(d.getDate())} / ${p(d.getMonth() + 1)} / ${d.getFullYear()}`;
@@ -254,6 +257,70 @@ function buildInvoiceHtml(d, company) {
   `);
 }
 
+// ---------------------------------------------------------------------------
+//  TIMESHEET
+// ---------------------------------------------------------------------------
+function buildTimesheetBody(d, company, job) {
+  const client = job.client || {};
+  const rows = (d.days || []).map((day, index) => {
+    const label = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][index];
+    const bg = index % 2 ? ` bgcolor="${ZEBRA}"` : "";
+    return `<tr>
+      <td${bg} style="font-size:11px; color:${INK};">${label}</td>
+      <td${bg} style="font-size:11px; color:${INK};">${fmtDate(day.date)}</td>
+      <td${bg} align="right" style="font-size:11px; color:${INK};">${Number(day.hours || 0).toFixed(2)}</td>
+    </tr>`;
+  }).join("");
+  const detailLine = (label, value) => value
+    ? `<tr><td width="28%" style="font-size:11px; color:${SOFT};">${label}</td>
+         <td style="font-size:11px; color:${INK};">${esc(value)}</td></tr>`
+    : "";
+  const note = esc(d.weeklyNote || "").replace(/\n/g, "<br/>");
+
+  return wrap(`
+    ${letterhead("WEEKLY TIMESHEET", company)}
+    <table width="100%" border="0" cellspacing="0" cellpadding="3">
+      ${detailLine("Worker", d.workerName)}
+      ${detailLine("Job", job.name || d.jobName)}
+      ${detailLine("Client", client.name)}
+      ${detailLine("Attn", client.attn)}
+      ${detailLine("Phone", client.phone)}
+      ${detailLine("Job / site", job.jobSite)}
+      ${detailLine("Week", `${fmtDate(d.weekStart)} to ${fmtDate(d.weekEnd)}`)}
+    </table>
+    ${spacer()}
+    <table width="100%" border="0" cellspacing="0" cellpadding="8">
+      <tr>
+        <td width="42%" bgcolor="${BRAND}" style="font-size:11px; color:#fff; font-weight:bold;">Day</td>
+        <td width="38%" bgcolor="${BRAND}" style="font-size:11px; color:#fff; font-weight:bold;">Date</td>
+        <td width="20%" align="right" bgcolor="${BRAND}" style="font-size:11px; color:#fff; font-weight:bold;">Hours</td>
+      </tr>
+      ${rows}
+      <tr>
+        <td colspan="2" align="right" style="font-size:13px; color:${BRAND}; font-weight:bold;">TOTAL HOURS</td>
+        <td align="right" style="font-size:13px; color:${INK}; font-weight:bold;">${Number(d.totalHours || 0).toFixed(2)}</td>
+      </tr>
+    </table>
+    ${spacer()}
+    ${sectionTitle("WEEKLY NOTE")}
+    <p style="font-size:11px; color:${INK}; margin:0;">${note || "—"}</p>
+    ${spacer()}
+    ${spacer()}
+    ${sectionTitle("APPROVAL")}
+    ${spacer()}
+    <table width="100%" border="0" cellspacing="0" cellpadding="6">
+      <tr>
+        <td width="50%" style="font-size:11px; color:${INK};">Worker signature: __________________________</td>
+        <td width="50%" style="font-size:11px; color:${INK};">Date: __________________</td>
+      </tr>
+      <tr>
+        <td width="50%" style="font-size:11px; color:${INK};">Client signature: ___________________________</td>
+        <td width="50%" style="font-size:11px; color:${INK};">Date: __________________</td>
+      </tr>
+    </table>
+  `);
+}
+
 function signatureBlock() {
   const cell = (label, line) =>
     `<td width="33%" valign="bottom" nowrap style="font-size:11px; color:${INK};">${label}: ${line}</td>`;
@@ -278,4 +345,8 @@ function wrap(inner) {
 export function buildDocumentHtml(data, company) {
   const c = company || EMPTY_COMPANY;
   return data.type === "invoice" ? buildInvoiceHtml(data, c) : buildQuoteHtml(data, c);
+}
+
+export function buildTimesheetHtml(data, company, job) {
+  return buildTimesheetBody(data, company || EMPTY_COMPANY, job || {});
 }

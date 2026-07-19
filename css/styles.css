@@ -69,6 +69,9 @@ body { margin: 0; background: var(--bg); color: var(--ink); }
 }
 .btn-primary { background: var(--brand); color: #fff; }
 .btn-primary:hover { filter: brightness(1.08); }
+.btn-outline-primary { background: var(--card); border-color: var(--brand);
+  color: var(--brand); font-weight: 400; }
+.btn-outline-primary:hover { background: #eef3f8; }
 .btn-ghost { background: transparent; border-color: var(--line); color: var(--ink); }
 .btn-ghost:hover { background: var(--bg); }
 .btn-lg { padding: 13px 22px; font-size: 16px; }
@@ -98,7 +101,9 @@ code { background: var(--bg); padding: 2px 6px; border-radius: 5px; font-size: 1
 /* ---- Page headers ---- */
 .page-head { display: flex; align-items: center; margin-bottom: 18px; }
 .page-head h2 { margin: 0; }
-.head-actions { margin-left: auto; display: flex; gap: 8px; }
+.head-actions { margin-left: auto; display: flex; gap: 12px; align-items: center; }
+.toggle-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px;
+  color: var(--ink-soft); cursor: pointer; white-space: nowrap; }
 h3 { margin: 26px 0 10px; }
 
 /* ---- Stat cards (two rows of three, wide enough for large $ figures) ---- */
@@ -165,6 +170,7 @@ tr.row-flash > td { animation: rowflash 2s ease; }
   display: flex; align-items: center; justify-content: center; padding: 20px; }
 .modal { background: var(--card); border-radius: var(--radius); box-shadow: 0 20px 60px rgba(20,30,50,.35);
   padding: 24px; width: min(480px, 94vw); }
+.modal.quick-job-modal { width: min(720px, 94vw); }
 .modal h3 { margin: 0 0 16px; color: var(--brand); }
 .modal .f { margin-bottom: 12px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 6px; }
@@ -188,10 +194,17 @@ tr.row-flash > td { animation: rowflash 2s ease; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 16px; }
 .f { display: flex; flex-direction: column; gap: 4px; }
 .f.f-wide { grid-column: 1 / -1; }
+.f.field-span-2 { grid-column: span 2; }
 .f span { font-size: 12px; color: var(--ink-soft); }
-.f input, .f textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--line);
+.f input, .f textarea, .f select { font: inherit; padding: 8px 10px; border: 1px solid var(--line);
   border-radius: 7px; background: var(--card); color: var(--ink); }
-.f input:focus, .f textarea:focus { outline: 2px solid var(--brand); outline-offset: -1px; }
+.f input:focus, .f textarea:focus, .f select:focus { outline: 2px solid var(--brand); outline-offset: -1px; }
+.f input:disabled { opacity: 1; background: var(--card); color: var(--ink); cursor: not-allowed; }
+.job-picker-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px 16px; align-items: end; margin-bottom: 14px; }
+.job-picker-row .f { grid-column: span 2; }
+.job-picker-row .btn { width: 100%; min-height: 38px; }
+.detail-form-wide { max-width: 820px; }
 
 table.items { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
 table.items th { font-size: 11px; color: var(--ink-soft); text-align: left; padding: 4px 6px; }
@@ -214,3 +227,60 @@ table.items th.amt, table.items td.amt { width: 180px; }
 .form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 6px; }
 .save-status { text-align: right; margin-top: 10px; font-size: 13px; color: var(--ink-soft); }
 .save-status a { color: var(--brand); }
+
+/* ---- Jobs + timesheets ---- */
+.table-scroll { overflow-x: auto; padding-bottom: 4px; }
+.empty-state { background: var(--card); border: 1px dashed var(--line); border-radius: var(--radius);
+  padding: 30px; text-align: center; color: var(--ink-soft); }
+.empty-state h3 { margin-top: 0; color: var(--ink); }
+.link-button { border: 0; background: none; color: var(--brand); font: inherit;
+  padding: 0; cursor: pointer; text-align: left; }
+.link-button:hover { text-decoration: underline; }
+.back-link { display: block; margin-bottom: 8px; font-size: 13px; }
+.job-details { max-width: none; }
+.section-head { display: flex; align-items: flex-end; gap: 18px; margin-top: 24px; }
+.section-head h3 { margin: 0; }
+.section-head p { margin-bottom: 0; }
+.assign-worker { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.assign-worker select { font: inherit; padding: 7px 10px; border: 1px solid var(--line);
+  border-radius: 7px; background: var(--card); }
+.worker-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; margin-top: 12px; }
+.worker-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 16px; }
+.timesheet-context { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 22px; }
+.timesheet-context .f { min-width: 280px; }
+.job-filter-group { margin-left: auto; display: flex; align-items: flex-end; gap: 12px; }
+.filter-checks { display: flex; flex-direction: column; gap: 6px; padding-bottom: 2px; }
+.success-banner { background: #e6f4ec; border-color: #b9dfc9; color: var(--ok); }
+.week-picker { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+.week-picker strong { padding: 9px 4px; color: var(--brand); }
+table.timesheet-grid { width: 100%; border-collapse: collapse; }
+table.timesheet-grid th { text-align: left; font-size: 12px; color: var(--ink-soft);
+  padding: 8px 10px; background: var(--bg); border-bottom: 1px solid var(--line); }
+table.timesheet-grid td { padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }
+table.timesheet-grid .num { text-align: right; }
+table.timesheet-grid .hours-input { width: 110px; text-align: right; font: inherit;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; }
+table.timesheet-grid tfoot td { font-weight: 700; color: var(--brand); border-bottom: none; font-size: 16px; }
+table.list a.btn { display: inline-block; color: var(--ink); text-decoration: none; }
+
+@media (max-width: 900px) {
+  .topbar { flex-wrap: wrap; gap: 10px; }
+  .tabs { order: 3; width: 100%; overflow-x: auto; margin-left: 0; }
+  .tabs button { white-space: nowrap; }
+}
+@media (max-width: 560px) {
+  main { padding: 22px 12px; }
+  .user { display: none; }
+  .page-head { align-items: flex-start; gap: 12px; }
+  .week-picker .f { width: 100%; }
+  .week-picker .f input { width: 100%; }
+  .form-actions { flex-wrap: wrap; }
+  .section-head, .timesheet-context { align-items: stretch; flex-direction: column; }
+  .assign-worker { margin-left: 0; width: 100%; }
+  .assign-worker select { min-width: 0; flex: 1; }
+  .timesheet-context .f { min-width: 0; width: 100%; }
+  .job-filter-group { margin-left: 0; align-items: stretch; flex-direction: column; }
+  .job-picker-row { grid-template-columns: 1fr; }
+  .job-picker-row .f { grid-column: span 1; }
+  .f.field-span-2 { grid-column: span 1; }
+}

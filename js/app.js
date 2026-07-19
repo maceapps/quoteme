@@ -5,6 +5,7 @@ import { GOOGLE_CLIENT_ID } from "./config.js";
 import { initGoogle, signIn, signOut, getUserInfo, restoreToken, BUSINESS_FIELDS } from "./google.js";
 import {
   initStore, listQuotes, listInvoices,
+  listJobs,
   markQuoteConverted, setQuoteStatus, setInvoiceStatus, deleteDocument,
   getCompany, businessDetailsComplete, businessSheetUrl, refreshCompany, saveBusinessDetails,
   emailPdf, fetchPdfBlob, listDeleted, restoreDocument,
@@ -12,21 +13,36 @@ import {
 import { renderForm } from "./forms.js";
 import { money } from "./documents.js";
 import { withLoading } from "./ui.js";
+import { renderJobs } from "./jobs.js";
+import { renderAllTimesheets } from "./timesheets.js";
+import { renderWorkers } from "./workers.js";
 
 const el = (id) => document.getElementById(id);
 const state = { user: null, highlight: null };
 const num = (v) => Number(v) || 0;
 
 // --- view switching --------------------------------------------------------
+function canLeaveCurrentView() {
+  const guard = window.__quoteMeNavigationGuard;
+  if (typeof guard === "function" && !guard()) return false;
+  window.__quoteMeNavigationGuard = null;
+  return true;
+}
+
 function show(view) {
+  if (!canLeaveCurrentView()) return;
   document.querySelectorAll(".view").forEach((v) => (v.hidden = true));
   el(`view-${view}`).hidden = false;
+  const activeTab = view;
   document.querySelectorAll("#tabs button").forEach((b) =>
-    b.classList.toggle("is-active", b.dataset.view === view)
+    b.classList.toggle("is-active", b.dataset.view === activeTab)
   );
   if (view === "dashboard") renderDashboard();
   if (view === "quotes") renderQuotes();
   if (view === "invoices") renderInvoices();
+  if (view === "jobs") renderJobs(el("view-jobs"));
+  if (view === "workers") renderWorkers(el("view-workers"));
+  if (view === "timesheets") renderAllTimesheets(el("view-timesheets"));
   if (view === "business") renderBusiness(false);
   if (view === "deleted") renderDeleted();
 }
@@ -46,11 +62,10 @@ async function enterApp() {
     state.user = await getUserInfo();
     setSignedInUI(true);
     el("view-dashboard").innerHTML = "";
-    show("dashboard");
     await initStore();
     applyBranding();
+    show("dashboard");
   });
-  renderDashboard();
 }
 
 async function handleSignIn() {
@@ -81,12 +96,13 @@ async function tryAutoSignIn() {
 async function renderDashboard() {
   const c = el("view-dashboard");
   c.innerHTML = `<p class="muted">Loading…</p>`;
-  const [quotes, invoices] = await Promise.all([listQuotes(), listInvoices()]);
-
-  const qTotal = quotes.reduce((s, q) => s + num(q["Total (inc GST)"]), 0);
-  const qAccepted = quotes.filter((q) => q.Status === "Accepted");
-  const qPending = quotes.filter((q) => q.Status === "Pending");
-  const winRate = quotes.length ? Math.round((qAccepted.length / quotes.length) * 100) : 0;
+  const [quotes, invoices, jobs] = await Promise.all([
+    listQuotes(),
+    listInvoices(),
+    listJobs({ includeArchived: true }),
+  ]);
+  const activeJobs = jobs.filter((job) => (job.status || "Active") === "Active");
+  const completedJobs = jobs.filter((job) => job.status === "Complete");
 
   const invoiced = invoices.reduce((s, i) => s + num(i["Total (inc GST)"]), 0);
   const received = invoices.reduce((s, i) => s + num(i.Received), 0);
@@ -102,9 +118,9 @@ async function renderDashboard() {
       </div>
     </div>
     <div class="cards">
-      ${statCard("Quotes logged", quotes.length)}
-      ${statCard("Win rate", winRate + "%")}
-      ${statCard("Pending quotes", money(qPending.reduce((s, q) => s + num(q["Total (inc GST)"]), 0)))}
+      ${statCard("Total jobs", jobs.length)}
+      ${statCard("Active jobs", activeJobs.length)}
+      ${statCard("Completed jobs", completedJobs.length)}
       ${statCard("Total invoiced", money(invoiced))}
       ${statCard("Received", money(received))}
       ${statCard("Outstanding", money(outstanding), outstanding > 0 ? "bad" : "ok")}
@@ -387,7 +403,7 @@ async function convertQuote(quoteNumber, quotes) {
   const q = quotes.find((x) => x["Quote No."] === quoteNumber);
   const src = q?._data || {};
   const prefill = {
-    client: src.client, jobSite: src.jobSite,
+    jobId: src.jobId, client: src.client, jobSite: src.jobSite,
     lineItems: src.lineItems, quoteRef: quoteNumber,
     summary: src.summary,
   };
@@ -635,6 +651,7 @@ async function boot() {
   el("signin-btn").addEventListener("click", handleSignIn);
   el("welcome-signin").addEventListener("click", handleSignIn);
   el("signout-btn").addEventListener("click", () => {
+    if (!canLeaveCurrentView()) return;
     signOut(); state.user = null; setSignedInUI(false); show("welcome");
   });
   document.querySelectorAll("#tabs button").forEach((b) =>

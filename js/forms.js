@@ -5,7 +5,7 @@
 // ============================================================================
 import { QUOTE_VALID_DAYS, INVOICE_DUE_DAYS } from "./config.js";
 import { computeTotals, money } from "./documents.js";
-import { nextNumber, saveDocument, updateDocument, getCompany } from "./store.js";
+import { nextNumber, saveDocument, updateDocument, getCompany, listJobs, saveJob } from "./store.js";
 import { showLoading, hideLoading } from "./ui.js";
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
@@ -16,7 +16,7 @@ function addDays(iso, days) {
 }
 
 const field = (label, name, value = "", type = "text", extra = "") => `
-  <label class="f">
+  <label class="f${name === "jobSite" ? " field-span-2" : ""}">
     <span>${label}</span>
     <input name="${name}" type="${type}" value="${escAttr(value)}" ${extra}/>
   </label>`;
@@ -26,7 +26,10 @@ const area = (label, name, value = "", rows = 3) => `
     <textarea name="${name}" rows="${rows}">${escHtml(value)}</textarea>
   </label>`;
 
-function escAttr(s) { return String(s ?? "").replace(/"/g, "&quot;"); }
+function escAttr(s) {
+  return String(s ?? "").replace(/[<>&"]/g, (c) =>
+    ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+}
 function escHtml(s) { return String(s ?? "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])); }
 
 // --- render ----------------------------------------------------------------
@@ -45,13 +48,21 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
     <form id="doc-form" class="doc-form">
       <fieldset>
         <legend>${isQuote ? "Prepared for" : "Bill to"}</legend>
+        <div class="job-picker-row">
+          <label class="f"><span>Job</span>
+            <select name="jobId" id="job-select" required>
+              <option value="">Loading jobs…</option>
+            </select>
+          </label>
+          <button type="button" class="btn btn-outline-primary" id="create-job-btn">+ Create new job</button>
+        </div>
         <div class="grid">
-          ${field("Client / Company name", "client.name", client.name)}
-          ${field("Contact (Attn)", "client.attn", client.attn)}
-          ${field("Address", "client.address", client.address)}
-          ${field("Suburb, State, Postcode", "client.suburb", client.suburb)}
-          ${field("Phone", "client.phone", client.phone)}
-          ${field("Job / site address", "jobSite", p.jobSite)}
+          ${field("Client / Company name", "client.name", client.name, "text", "disabled")}
+          ${field("Contact (Attn)", "client.attn", client.attn, "text", "disabled")}
+          ${field("Address", "client.address", client.address, "text", "disabled")}
+          ${field("Suburb, State, Postcode", "client.suburb", client.suburb, "text", "disabled")}
+          ${field("Phone", "client.phone", client.phone, "text", "disabled")}
+          ${field("Job / site address", "jobSite", p.jobSite, "text", "disabled")}
         </div>
       </fieldset>
 
@@ -112,6 +123,46 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
       <div class="save-status" id="save-status"></div>
     </form>
   `;
+
+  const jobSelect = container.querySelector("#job-select");
+  listJobs({ includeArchived: true }).then((allJobs) => {
+    const jobs = allJobs.filter((job) =>
+      (job.status || "Active") === "Active" || job.id === p.jobId);
+    const renderJobOptions = (selectedId = "") => {
+      jobSelect.innerHTML = `<option value="">— Select a job —</option>` +
+        jobs.map((job) => `<option value="${escAttr(job.id)}"
+          ${job.id === selectedId ? "selected" : ""}>
+          ${escHtml(job.name)}${job.status !== "Active" ? ` (${escHtml((job.status || "").toLowerCase())})` : ""}
+        </option>`).join("");
+    };
+    const applyJob = (job) => {
+      if (!job) return;
+      const form = container.querySelector("#doc-form");
+      const values = {
+        "client.name": job.client?.name || "",
+        "client.attn": job.client?.attn || "",
+        "client.address": job.client?.address || "",
+        "client.suburb": job.client?.suburb || "",
+        "client.phone": job.client?.phone || "",
+        jobSite: job.jobSite || "",
+      };
+      for (const [name, value] of Object.entries(values)) form.elements[name].value = value;
+    };
+    renderJobOptions(p.jobId || "");
+    jobSelect.addEventListener("change", () => {
+      const job = jobs.find((item) => item.id === jobSelect.value);
+      applyJob(job);
+    });
+    container.querySelector("#create-job-btn").addEventListener("click", () =>
+      openQuickJobModal(async (job) => {
+        jobs.push(job);
+        renderJobOptions(job.id);
+        applyJob(job);
+      }));
+  }).catch((error) => {
+    console.error(error);
+    jobSelect.innerHTML = `<option value="">Jobs could not be loaded</option>`;
+  });
 
   const body = container.querySelector("#items-body");
   items.forEach((it) => body.appendChild(itemRow(it)));
@@ -193,12 +244,77 @@ export function renderForm(type, container, { prefill = null, onSaved, editMode 
   });
 }
 
+function openQuickJobModal(onSaved) {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal quick-job-modal">
+      <h3>Create new job</h3>
+      <form id="quick-job-form">
+        <div class="grid">
+          ${field("Job name", "name", "", "text", "required")}
+          ${field("Client / Company name", "client.name")}
+          ${field("Contact (Attn)", "client.attn")}
+          ${field("Address", "client.address")}
+          ${field("Suburb, State, Postcode", "client.suburb")}
+          ${field("Phone", "client.phone", "", "tel")}
+          ${field("Job / site address", "jobSite")}
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" id="quick-job-cancel">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="quick-job-save">Save job</button>
+        </div>
+        <div class="save-status" id="quick-job-status"></div>
+      </form>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
+  overlay.querySelector("#quick-job-cancel").addEventListener("click", close);
+  overlay.querySelector('[name="name"]').focus();
+  overlay.querySelector("#quick-job-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = overlay.querySelector("#quick-job-save");
+    const status = overlay.querySelector("#quick-job-status");
+    const value = (name) => form.elements[name].value.trim();
+    button.disabled = true;
+    status.textContent = "Saving…";
+    showLoading("Saving job…");
+    try {
+      const job = await saveJob({
+        name: value("name"),
+        status: "Active",
+        jobSite: value("jobSite"),
+        client: {
+          name: value("client.name"),
+          attn: value("client.attn"),
+          address: value("client.address"),
+          suburb: value("client.suburb"),
+          phone: value("client.phone"),
+        },
+      });
+      close();
+      await onSaved?.(job);
+    } catch (error) {
+      console.error(error);
+      status.textContent = "⚠️ " + (error.message || "Save failed");
+      button.disabled = false;
+    } finally {
+      hideLoading();
+    }
+  });
+}
+
 function collectData(container, type, lineItems) {
   const f = container.querySelector("#doc-form");
   const get = (n) => (f.elements[n] ? f.elements[n].value : "");
+  if (!get("jobId")) throw new Error("Select or create a job before saving.");
   const data = {
     type,
     number: container.querySelector("#doc-no").dataset.number,
+    jobId: get("jobId"),
     client: { name: get("client.name"), attn: get("client.attn"), address: get("client.address"),
               suburb: get("client.suburb"), phone: get("client.phone") },
     jobSite: get("jobSite"),

@@ -5,6 +5,7 @@
 import {
   GOOGLE_CLIENT_ID, GOOGLE_SCOPES,
   DRIVE_FOLDER_NAME, REGISTER_SHEET_NAME,
+  TIMESHEETS_SHEET_NAME,
 } from "./config.js";
 
 const DISCOVERY_DOCS = [
@@ -159,6 +160,18 @@ export async function moveFile(fileId, addParentId, removeParentId) {
   });
 }
 
+async function placeCreatedFileInFolder(fileId, parentId) {
+  if (!parentId) return;
+  const current = await gapi.client.drive.files.get({ fileId, fields: "parents" });
+  const removeParents = (current.result.parents || []).filter((id) => id !== parentId).join(",");
+  await gapi.client.drive.files.update({
+    fileId,
+    addParents: parentId,
+    removeParents: removeParents || undefined,
+    fields: "id,parents",
+  });
+}
+
 // Upload an HTML string, converting it to a native Google Doc in `parentId`.
 // Returns { id, webViewLink }.
 export async function uploadHtmlAsDoc(name, html, parentId) {
@@ -246,9 +259,7 @@ export async function ensureRegisterSheet(parentId) {
   const id = create.result.spreadsheetId;
 
   // Move it into the app folder (create places it at Drive root by default).
-  if (parentId) {
-    await gapi.client.drive.files.update({ fileId: id, addParents: parentId, fields: "id" });
-  }
+  await placeCreatedFileInFolder(id, parentId);
 
   // Header rows.
   const quoteHeaders = ["Quote No.", "Date Issued", "Client", "Job / Site", "Description",
@@ -271,6 +282,94 @@ export async function ensureRegisterSheet(parentId) {
   return id;
 }
 
+const TIMESHEET_TABS = {
+  Jobs: [
+    "Job ID", "Status", "Job Name", "Client", "Attn", "Address",
+    "Suburb / State / Postcode", "Phone", "Job / Site", "Created", "Updated", "DataJSON",
+    "Legacy Worker IDs (unused)",
+  ],
+  Workers: [
+    "Worker ID", "Status", "First Name", "Last Name", "Mobile", "Created", "Updated", "DataJSON",
+  ],
+  Timesheets: [
+    "Timesheet ID", "Week Start", "Week End", "Job ID", "Job Name", "Worker",
+    "Monday Date", "Monday Hours", "Tuesday Date", "Tuesday Hours",
+    "Wednesday Date", "Wednesday Hours", "Thursday Date", "Thursday Hours",
+    "Friday Date", "Friday Hours", "Saturday Date", "Saturday Hours",
+    "Sunday Date", "Sunday Hours", "Total Hours", "Weekly Note",
+    "DocLink", "PdfLink", "Created", "Updated", "DataJSON",
+    "Worker ID",
+  ],
+};
+
+// Ensure the dedicated timesheet spreadsheet exists inside the Timesheets
+// subfolder. Existing files are migrated by adding any missing tabs/headers.
+export async function ensureTimesheetSheet(parentId) {
+  let file = await findFile(TIMESHEETS_SHEET_NAME, {
+    mimeType: "application/vnd.google-apps.spreadsheet",
+    parentId,
+  });
+  let spreadsheetId;
+
+  if (file) {
+    spreadsheetId = file.id;
+  } else {
+    const create = await gapi.client.sheets.spreadsheets.create({
+      resource: {
+        properties: { title: TIMESHEETS_SHEET_NAME },
+        sheets: Object.keys(TIMESHEET_TABS).map((title) => ({ properties: { title } })),
+      },
+      fields: "spreadsheetId",
+    });
+    spreadsheetId = create.result.spreadsheetId;
+    await placeCreatedFileInFolder(spreadsheetId, parentId);
+  }
+
+  const meta = await gapi.client.sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets.properties(title)",
+  });
+  const existingTitles = new Set((meta.result.sheets || []).map((s) => s.properties.title));
+  const missing = Object.keys(TIMESHEET_TABS).filter((title) => !existingTitles.has(title));
+  if (missing.length) {
+    await gapi.client.sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      resource: {
+        requests: missing.map((title) => ({ addSheet: { properties: { title } } })),
+      },
+    });
+  }
+
+  const headerWrites = [];
+  for (const [title, headers] of Object.entries(TIMESHEET_TABS)) {
+    const current = await gapi.client.sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${title}!1:1`,
+    });
+    const row = current.result.values?.[0] || [];
+    const normalisedRow = row.map((value, index) =>
+      title === "Jobs" && index === 12 && value === "Worker IDs" ? headers[index] : value);
+    const isCompatiblePrefix = normalisedRow.every((value, index) => value === headers[index]);
+    if (!isCompatiblePrefix) {
+      throw new Error(
+        `The ${title} tab in “${TIMESHEETS_SHEET_NAME}” has incompatible columns. ` +
+        "Rename or remove that app-created spreadsheet, then sign in again.",
+      );
+    }
+    if (row.length !== headers.length || normalisedRow.some((value, index) => value !== row[index])) {
+      headerWrites.push({ range: `${title}!A1`, values: [headers] });
+    }
+  }
+  if (headerWrites.length) {
+    await gapi.client.sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId,
+      resource: { valueInputOption: "RAW", data: headerWrites },
+    });
+  }
+
+  return spreadsheetId;
+}
+
 export async function appendRow(spreadsheetId, tab, values) {
   await gapi.client.sheets.spreadsheets.values.append({
     spreadsheetId,
@@ -284,7 +383,7 @@ export async function appendRow(spreadsheetId, tab, values) {
 export async function readRows(spreadsheetId, tab) {
   const res = await gapi.client.sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${tab}!A1:Z10000`,
+    range: `${tab}!A1:AZ10000`,
   });
   return res.result.values || [];
 }
@@ -296,6 +395,14 @@ export async function updateValues(spreadsheetId, range, values) {
     range,
     valueInputOption: "USER_ENTERED",
     resource: { values },
+  });
+}
+
+export async function clearValues(spreadsheetId, range) {
+  await gapi.client.sheets.spreadsheets.values.clear({
+    spreadsheetId,
+    range,
+    resource: {},
   });
 }
 
@@ -325,6 +432,10 @@ export async function deleteSheetRow(spreadsheetId, sheetId, rowIndex0) {
 // Move a Drive file to trash (recoverable ~30 days). Works on files the app created.
 export async function trashFile(fileId) {
   await gapi.client.drive.files.update({ fileId, resource: { trashed: true } });
+}
+
+export async function deleteDriveFile(fileId) {
+  await gapi.client.drive.files.delete({ fileId });
 }
 
 // Fetch a Drive file's bytes as a Blob (for downloading to the device).

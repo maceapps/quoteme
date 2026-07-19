@@ -6,18 +6,26 @@
 // ============================================================================
 import {
   QUOTE_PREFIX, INVOICE_PREFIX, NUMBER_PAD, DELETED_FOLDER_NAME,
+  TIMESHEETS_FOLDER_NAME,
 } from "./config.js";
 import {
   ensureFolder, ensureRegisterSheet, ensureSubFolder, moveFile,
   uploadHtmlAsDoc, exportDocAsPdf,
-  appendRow, readRows, updateValues,
-  getSheetId, trashFile, fetchDriveFile,
+  appendRow, readRows, updateValues, clearValues,
+  getSheetId, trashFile, deleteDriveFile, fetchDriveFile,
   ensureBusinessSheet, readBusinessDetails, writeBusinessDetails, BUSINESS_TAB,
-  sendGmailWithPdf,
+  sendGmailWithPdf, ensureTimesheetSheet,
 } from "./google.js";
-import { buildDocumentHtml, computeTotals } from "./documents.js";
+import { buildDocumentHtml, buildTimesheetHtml, computeTotals } from "./documents.js";
 
-let ctx = { folderId: null, sheetId: null, company: null, deletedFolderId: null };
+let ctx = {
+  folderId: null,
+  sheetId: null,
+  company: null,
+  deletedFolderId: null,
+  timesheetsFolderId: null,
+  timesheetsSheetId: null,
+};
 
 // Called once after sign-in so store.js knows where things live and who we are.
 export async function initStore() {
@@ -25,6 +33,10 @@ export async function initStore() {
   ctx.sheetId = await ensureRegisterSheet(ctx.folderId);
   await ensureBusinessSheet(ctx.sheetId);
   ctx.company = await readBusinessDetails(ctx.sheetId);
+  ctx.timesheetsFolderId = await ensureSubFolder(TIMESHEETS_FOLDER_NAME, ctx.folderId);
+  ctx.timesheetsSheetId = await ensureTimesheetSheet(ctx.timesheetsFolderId);
+  const unresolvedLegacyJobs = await backfillLegacyTimesheetWorkerIds();
+  await clearLegacyJobWorkerAssociations(unresolvedLegacyJobs);
   return ctx;
 }
 
@@ -34,8 +46,14 @@ async function ensureDeletedFolder() {
   return ctx.deletedFolderId;
 }
 
-// Column letter for a 0-based index (A, B, … Z — enough for our register).
-function columnLetter(i) { return String.fromCharCode(65 + i); }
+// Column letter for a 0-based index (A, B, … Z, AA, AB, …).
+function columnLetter(i) {
+  let out = "";
+  for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) {
+    out = String.fromCharCode(65 + ((n - 1) % 26)) + out;
+  }
+  return out;
+}
 
 // The company info loaded from the Business Details tab (or null before init).
 export function getCompany() { return ctx.company; }
@@ -62,6 +80,503 @@ export async function saveBusinessDetails(company) {
   await writeBusinessDetails(ctx.sheetId, company);
   ctx.company = await readBusinessDetails(ctx.sheetId);
   return ctx.company;
+}
+
+// ---------------------------------------------------------------------------
+//  JOBS + TIMESHEETS
+// ---------------------------------------------------------------------------
+const JOBS_TAB = "Jobs";
+const WORKERS_TAB = "Workers";
+const TIMESHEETS_TAB = "Timesheets";
+
+async function clearLegacyJobWorkerAssociations(skipJobIds = new Set()) {
+  if (!ctx.timesheetsSheetId) return;
+  const rows = await readRows(ctx.timesheetsSheetId, JOBS_TAB);
+  for (let index = 1; index < rows.length; index++) {
+    const row = rows[index];
+    if (skipJobIds.has(row[0])) continue;
+    let data = null;
+    let hadAssociation = row[12] && row[12] !== "[]";
+    try {
+      const parsed = JSON.parse(row[11] || "");
+      if (parsed && typeof parsed === "object") {
+        data = parsed;
+        if (Object.prototype.hasOwnProperty.call(data, "workerIds")) {
+          delete data.workerIds;
+          hadAssociation = true;
+        }
+      }
+    } catch {}
+    if (!hadAssociation) continue;
+    await updateValues(
+      ctx.timesheetsSheetId,
+      `${JOBS_TAB}!L${index + 1}:M${index + 1}`,
+      [[data ? JSON.stringify(data) : (row[11] || ""), "[]"]],
+    );
+  }
+}
+
+function makeId(prefix) {
+  const id = globalThis.crypto?.randomUUID?.()
+    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${id}`;
+}
+
+function jobRow(job, legacyWorkerIds = "[]") {
+  return [
+    job.id, job.status || "Active", job.name, job.client?.name || "",
+    job.client?.attn || "", job.client?.address || "", job.client?.suburb || "",
+    job.client?.phone || "", job.jobSite || "", job.createdAt, job.updatedAt,
+    JSON.stringify(job),
+    legacyWorkerIds, // Retained only while unresolved legacy timesheets need migration.
+  ];
+}
+
+function jobFromRow(row) {
+  if (row._data) {
+    const { workerIds: _legacyWorkerIds, ...job } = row._data;
+    return job;
+  }
+  return {
+    id: row["Job ID"], status: row.Status || "Active", name: row["Job Name"],
+    client: {
+      name: row.Client || "", attn: row.Attn || "", address: row.Address || "",
+      suburb: row["Suburb / State / Postcode"] || "", phone: row.Phone || "",
+    },
+    jobSite: row["Job / Site"] || "",
+    createdAt: row.Created || "", updatedAt: row.Updated || "",
+  };
+}
+
+export async function listJobs({ includeArchived = false } = {}) {
+  const rows = rowsToObjects(await readRows(ctx.timesheetsSheetId, JOBS_TAB));
+  return rows.map(jobFromRow).filter((job) => includeArchived || job.status !== "Archived");
+}
+
+export async function saveJob(input) {
+  const now = new Date().toISOString();
+  const { workerIds: _legacyWorkerIds, ...jobInput } = input;
+  const job = {
+    ...jobInput,
+    id: input.id || makeId("JOB"),
+    status: input.status || "Active",
+    createdAt: input.createdAt || now,
+    updatedAt: now,
+  };
+  if (!job.name?.trim()) throw new Error("Job name is required.");
+
+  const rows = await readRows(ctx.timesheetsSheetId, JOBS_TAB);
+  const idx = rows.findIndex((row, i) => i > 0 && row[0] === job.id);
+  let legacyWorkerIds = idx >= 0 ? (rows[idx][12] || "[]") : "[]";
+  if (idx >= 0 && legacyWorkerIds === "[]") {
+    try {
+      const ids = JSON.parse(rows[idx][11] || "{}").workerIds;
+      if (Array.isArray(ids) && ids.length) legacyWorkerIds = JSON.stringify(ids);
+    } catch {}
+  }
+  const values = jobRow(job, legacyWorkerIds);
+  if (idx < 0) {
+    await appendRow(ctx.timesheetsSheetId, JOBS_TAB, values);
+  } else {
+    const sheetRow = idx + 1;
+    await updateValues(
+      ctx.timesheetsSheetId,
+      `${JOBS_TAB}!A${sheetRow}:${columnLetter(values.length - 1)}${sheetRow}`,
+      [values],
+    );
+  }
+  return job;
+}
+
+export async function archiveJob(id) {
+  const jobs = await listJobs({ includeArchived: true });
+  const job = jobs.find((item) => item.id === id);
+  if (!job) throw new Error("Job could not be found.");
+  return saveJob({ ...job, status: "Archived" });
+}
+
+export async function deleteJob(id) {
+  const rows = await readRows(ctx.timesheetsSheetId, JOBS_TAB);
+  const index = rows.findIndex((row, rowIndex) => rowIndex > 0 && row[0] === id);
+  if (index < 0) throw new Error("Job could not be found.");
+  if ((rows[index][1] || "Active") !== "Archived") {
+    throw new Error("A job must be archived before it can be deleted.");
+  }
+  const sheetRow = index + 1;
+  await clearValues(ctx.timesheetsSheetId, `${JOBS_TAB}!A${sheetRow}:M${sheetRow}`);
+  const remaining = await readRows(ctx.timesheetsSheetId, JOBS_TAB);
+  if (remaining.some((row, rowIndex) => rowIndex > 0 && row[0] === id)) {
+    throw new Error("Google Sheets did not remove the job row. Please try again.");
+  }
+}
+
+function workerRow(worker) {
+  return [
+    worker.id, worker.status || "Active", worker.firstName, worker.lastName,
+    worker.mobile || "", worker.createdAt, worker.updatedAt, JSON.stringify(worker),
+  ];
+}
+
+function workerFromRow(row) {
+  if (row._data) return row._data;
+  return {
+    id: row["Worker ID"], status: row.Status || "Active",
+    firstName: row["First Name"] || "", lastName: row["Last Name"] || "",
+    mobile: row.Mobile || "", createdAt: row.Created || "", updatedAt: row.Updated || "",
+  };
+}
+
+export async function listWorkers({ includeArchived = false } = {}) {
+  const rows = rowsToObjects(await readRows(ctx.timesheetsSheetId, WORKERS_TAB));
+  return rows.map(workerFromRow)
+    .filter((worker) => includeArchived || worker.status !== "Archived")
+    .sort((a, b) => `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`));
+}
+
+async function backfillLegacyTimesheetWorkerIds() {
+  if (!ctx.timesheetsSheetId) return new Set();
+  const [rows, jobRows, workers] = await Promise.all([
+    readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB),
+    readRows(ctx.timesheetsSheetId, JOBS_TAB),
+    listWorkers({ includeArchived: true }),
+  ]);
+  const byName = new Map();
+  for (const worker of workers) {
+    const name = `${worker.firstName} ${worker.lastName}`.trim().toLowerCase();
+    if (!name) continue;
+    byName.set(name, [...(byName.get(name) || []), worker]);
+  }
+  const workersByJob = new Map();
+  for (const row of jobRows.slice(1)) {
+    let ids = [];
+    try { ids = JSON.parse(row[12] || "[]"); } catch {}
+    if (!ids.length) {
+      try { ids = JSON.parse(row[11] || "{}").workerIds || []; } catch {}
+    }
+    workersByJob.set(row[0], new Set(ids));
+  }
+  const unresolvedJobIds = new Set();
+  for (let index = 1; index < rows.length; index++) {
+    const row = rows[index];
+    if (row[27] || !row[5]) continue;
+    let candidates = byName.get(String(row[5]).trim().toLowerCase()) || [];
+    if (candidates.length > 1) {
+      const assigned = workersByJob.get(row[3]) || new Set();
+      candidates = candidates.filter((candidate) => assigned.has(candidate.id));
+    }
+    const worker = candidates.length === 1 ? candidates[0] : null;
+    if (!worker) {
+      if (row[3]) unresolvedJobIds.add(row[3]);
+      continue;
+    }
+    let data = null;
+    try {
+      const parsed = JSON.parse(row[26] || "");
+      if (parsed && typeof parsed === "object" && parsed.id) data = parsed;
+    } catch {}
+    if (data) {
+      data.workerId = worker.id;
+      data.workerSnapshot = data.workerSnapshot || worker;
+      await updateValues(
+        ctx.timesheetsSheetId,
+        `${TIMESHEETS_TAB}!AA${index + 1}:AB${index + 1}`,
+        [[JSON.stringify(data), worker.id]],
+      );
+    } else {
+      await updateValues(
+        ctx.timesheetsSheetId,
+        `${TIMESHEETS_TAB}!AB${index + 1}`,
+        [[worker.id]],
+      );
+    }
+  }
+  return unresolvedJobIds;
+}
+
+export async function saveWorker(input) {
+  const now = new Date().toISOString();
+  const worker = {
+    ...input,
+    id: input.id || makeId("WORKER"),
+    firstName: input.firstName?.trim() || "",
+    lastName: input.lastName?.trim() || "",
+    mobile: input.mobile?.trim() || "",
+    status: input.status || "Active",
+    createdAt: input.createdAt || now,
+    updatedAt: now,
+  };
+  if (!worker.firstName || !worker.lastName) {
+    throw new Error("First name and last name are required.");
+  }
+
+  const rows = await readRows(ctx.timesheetsSheetId, WORKERS_TAB);
+  const idx = rows.findIndex((row, i) => i > 0 && row[0] === worker.id);
+  const values = workerRow(worker);
+  if (idx < 0) {
+    await appendRow(ctx.timesheetsSheetId, WORKERS_TAB, values);
+  } else {
+    const sheetRow = idx + 1;
+    await updateValues(
+      ctx.timesheetsSheetId,
+      `${WORKERS_TAB}!A${sheetRow}:${columnLetter(values.length - 1)}${sheetRow}`,
+      [values],
+    );
+  }
+  const unresolvedLegacyJobs = await backfillLegacyTimesheetWorkerIds();
+  await clearLegacyJobWorkerAssociations(unresolvedLegacyJobs);
+  return worker;
+}
+
+export async function archiveWorker(id) {
+  const workers = await listWorkers({ includeArchived: true });
+  const worker = workers.find((item) => item.id === id);
+  if (!worker) throw new Error("Worker could not be found.");
+  return saveWorker({ ...worker, status: "Archived" });
+}
+
+function timesheetRow(sheet) {
+  const days = sheet.days || [];
+  const dayCells = [];
+  for (let i = 0; i < 7; i++) {
+    dayCells.push(days[i]?.date || "", Number(days[i]?.hours) || 0);
+  }
+  return [
+    sheet.id, sheet.weekStart, sheet.weekEnd, sheet.jobId, sheet.jobName,
+    sheet.workerName, ...dayCells, Number(sheet.totalHours) || 0,
+    sheet.weeklyNote || "", sheet.docLink || "", sheet.pdfLink || "",
+    sheet.createdAt, sheet.updatedAt, JSON.stringify(sheet),
+    sheet.workerId || "",
+  ];
+}
+
+function timesheetFromRow(row) {
+  if (row._data) return { ...row._data, workerId: row._data.workerId || row["Worker ID"] || "" };
+  const dayNames = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  return {
+    id: row["Timesheet ID"], weekStart: row["Week Start"], weekEnd: row["Week End"],
+    jobId: row["Job ID"], jobName: row["Job Name"], workerName: row.Worker || "",
+    days: dayNames.map((name) => ({
+      date: row[`${name} Date`] || "",
+      hours: Number(row[`${name} Hours`]) || 0,
+    })),
+    totalHours: Number(row["Total Hours"]) || 0,
+    weeklyNote: row["Weekly Note"] || "",
+    docLink: row.DocLink || "", pdfLink: row.PdfLink || "",
+    workerId: row["Worker ID"] || "",
+    createdAt: row.Created || "", updatedAt: row.Updated || "",
+  };
+}
+
+export async function listTimesheets() {
+  const rows = rowsToObjects(await readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB));
+  return rows.map(timesheetFromRow).sort((a, b) =>
+    (b.weekStart || "").localeCompare(a.weekStart || "")
+    || (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+}
+
+export async function deleteTimesheet(id) {
+  const rows = await readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB);
+  const index = rows.findIndex((row, rowIndex) => rowIndex > 0 && row[0] === id);
+  if (index < 0) throw new Error("Timesheet could not be found.");
+  const row = rows[index];
+  await clearValues(ctx.timesheetsSheetId, `${TIMESHEETS_TAB}!A${index + 1}:AB${index + 1}`);
+  for (const link of [row[22], row[23]]) {
+    const fileId = fileIdFromLink(link);
+    if (fileId) {
+      try { await deleteDriveFile(fileId); } catch (error) {
+        console.warn("Could not permanently delete a generated timesheet file", error);
+      }
+    }
+  }
+  const remaining = await readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB);
+  if (remaining.some((item, rowIndex) => rowIndex > 0 && item[0] === id)) {
+    throw new Error("Google Sheets did not remove the timesheet. Please try again.");
+  }
+}
+
+export async function getTimesheet(jobId, workerId, weekStart) {
+  const sheets = await listTimesheets();
+  return sheets.find((sheet) =>
+    sheet.jobId === jobId && sheet.workerId === workerId && sheet.weekStart === weekStart) || null;
+}
+
+function dateOnly(iso) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12);
+  return Number(match[1]) === date.getFullYear()
+    && Number(match[2]) === date.getMonth() + 1
+    && Number(match[3]) === date.getDate()
+    ? date
+    : null;
+}
+
+function localISO(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function validatedTimesheet(input) {
+  if (!input.jobId) throw new Error("Please select a job.");
+  if (!input.workerId) throw new Error("Please select a worker.");
+  const workerName = input.workerName?.trim();
+  if (!workerName) throw new Error("Worker name is required.");
+  const start = dateOnly(input.weekStart);
+  if (!start || start.getDay() !== 1) throw new Error("The timesheet must start on a Monday.");
+  if (!Array.isArray(input.days) || input.days.length !== 7) {
+    throw new Error("The timesheet must contain Monday through Sunday.");
+  }
+
+  let totalHundredths = 0;
+  const days = input.days.map((day, index) => {
+    const expected = new Date(start);
+    expected.setDate(expected.getDate() + index);
+    const expectedISO = localISO(expected);
+    if (day.date !== expectedISO) throw new Error(`${expectedISO} is required for this timesheet day.`);
+    const raw = String(day.hours ?? "");
+    if (!/^\d+(?:\.\d{1,2})?$/.test(raw)) {
+      throw new Error("Daily hours must be numbers with no more than two decimal places.");
+    }
+    const hundredths = Math.round(Number(raw) * 100);
+    if (hundredths < 0 || hundredths > 2400) {
+      throw new Error("Daily hours must be between 0 and 24.");
+    }
+    totalHundredths += hundredths;
+    return { date: expectedISO, hours: hundredths / 100 };
+  });
+  if (!totalHundredths) throw new Error("Enter hours for at least one day.");
+
+  const end = new Date(start);
+  end.setDate(end.getDate() + 6);
+  return {
+    ...input,
+    workerName,
+    weekStart: localISO(start),
+    weekEnd: localISO(end),
+    days,
+    totalHours: totalHundredths / 100,
+  };
+}
+
+export async function saveTimesheet(input, { allowDeletedJobForPdf = false } = {}) {
+  input = validatedTimesheet(input);
+  const now = new Date().toISOString();
+  const rows = await readRows(ctx.timesheetsSheetId, TIMESHEETS_TAB);
+  const idIdx = input.id
+    ? rows.findIndex((row, i) => i > 0 && row[0] === input.id)
+    : -1;
+  const keyIdx = rows.findIndex((row, i) =>
+    i > 0
+    && row[3] === input.jobId
+    && row[1] === input.weekStart
+    && (row[27] === input.workerId || (!row[27] && row[5] === input.workerName)));
+  if (idIdx >= 0 && keyIdx >= 0 && idIdx !== keyIdx) {
+    throw new Error("Another timesheet already exists for this job and week.");
+  }
+  const idx = idIdx >= 0 ? idIdx : keyIdx;
+
+  let existing = null;
+  if (idx >= 0) {
+    existing = timesheetFromRow(rowsToObjects([rows[0], rows[idx]])[0]);
+  }
+  if (existing?.workerId && existing.workerId !== input.workerId) {
+    throw new Error("A saved timesheet cannot be moved to another worker.");
+  }
+  if (existing?.jobId && existing.jobId !== input.jobId) {
+    throw new Error("A saved timesheet cannot be moved to another job.");
+  }
+  const job = await listJobs({ includeArchived: true })
+    .then((items) => items.find((item) => item.id === input.jobId));
+  if (!job && (!existing || !allowDeletedJobForPdf)) {
+    throw new Error("This timesheet cannot be edited because its job has been deleted.");
+  }
+  if (!existing) {
+    const worker = await listWorkers()
+      .then((items) => items.find((item) => item.id === input.workerId));
+    if ((job.status || "Active") !== "Active") {
+      throw new Error("Only active jobs can have new timesheets.");
+    }
+    if (!worker) throw new Error("The selected worker could not be found.");
+  }
+  const sheet = {
+    ...existing,
+    ...input,
+    id: existing?.id || input.id || makeId("TS"),
+    createdAt: existing?.createdAt || input.createdAt || now,
+    updatedAt: now,
+    docLink: input.docLink ?? existing?.docLink ?? "",
+    pdfLink: input.pdfLink ?? existing?.pdfLink ?? "",
+  };
+  const values = timesheetRow(sheet);
+  if (idx < 0) {
+    await appendRow(ctx.timesheetsSheetId, TIMESHEETS_TAB, values);
+  } else {
+    const sheetRow = idx + 1;
+    await updateValues(
+      ctx.timesheetsSheetId,
+      `${TIMESHEETS_TAB}!A${sheetRow}:${columnLetter(values.length - 1)}${sheetRow}`,
+      [values],
+    );
+  }
+  const clearedGeneratedFiles =
+    (Object.prototype.hasOwnProperty.call(input, "docLink") && input.docLink === "")
+    || (Object.prototype.hasOwnProperty.call(input, "pdfLink") && input.pdfLink === "");
+  if (clearedGeneratedFiles && existing) {
+    for (const oldLink of [existing.docLink, existing.pdfLink]) {
+      const oldId = fileIdFromLink(oldLink);
+      if (oldId) {
+        try { await trashFile(oldId); } catch (e) { console.warn("Could not trash stale timesheet file", e); }
+      }
+    }
+  }
+  return sheet;
+}
+
+export async function generateTimesheetPdf(input) {
+  const sheet = await saveTimesheet(input, { allowDeletedJobForPdf: true });
+  const job = sheet.jobSnapshot
+    || (await listJobs({ includeArchived: true })).find((item) => item.id === sheet.jobId)
+    || {};
+  const html = buildTimesheetHtml(sheet, ctx.company, job);
+  const safeJob = (sheet.jobName || "Job").replace(/[\\/:*?"<>|]/g, "-");
+  const safeWorker = (sheet.workerName || "Worker").replace(/[\\/:*?"<>|]/g, "-");
+  const baseName = `Timesheet — ${safeJob} — ${safeWorker} — ${sheet.weekStart}`;
+  let doc = null;
+  let pdf = null;
+  let updated;
+  try {
+    doc = await uploadHtmlAsDoc(baseName, html, ctx.timesheetsFolderId);
+    pdf = await exportDocAsPdf(doc.id, `${baseName}.pdf`, ctx.timesheetsFolderId);
+    updated = await saveTimesheet(
+      {
+        ...sheet,
+        docLink: doc.webViewLink,
+        pdfLink: pdf.webViewLink,
+      },
+      { allowDeletedJobForPdf: true },
+    );
+  } catch (error) {
+    for (const file of [doc, pdf]) {
+      if (file?.id) {
+        try { await trashFile(file.id); } catch (cleanupError) {
+          console.warn("Could not clean up failed timesheet file", cleanupError);
+        }
+      }
+    }
+    throw error;
+  }
+  for (const oldLink of [sheet.docLink, sheet.pdfLink]) {
+    const oldId = fileIdFromLink(oldLink);
+    if (oldId) {
+      try { await trashFile(oldId); } catch (e) { console.warn("Could not trash old timesheet file", e); }
+    }
+  }
+
+  return {
+    sheet: updated,
+    blob: await fetchDriveFile(pdf.id),
+    fileName: `${baseName}.pdf`,
+  };
 }
 
 const TAB = { quote: "Quotes", invoice: "Invoices" };
