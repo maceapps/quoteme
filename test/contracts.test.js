@@ -5,7 +5,7 @@ import { validateBusinessDetails } from "../js/domain/business.js";
 import {
   validateConversionCommand, validateDocument, validateInvoiceStatusCommand,
 } from "../js/domain/documents.js";
-import { validateJob } from "../js/domain/jobs.js";
+import { assertJobNameAvailable, validateJob } from "../js/domain/jobs.js";
 import { validateTimesheet } from "../js/domain/timesheets.js";
 import { validateWorker } from "../js/domain/workers.js";
 
@@ -28,6 +28,24 @@ test("entity contracts reject unsupported statuses", () => {
     lastName: "Lovelace",
     status: "Away",
   }), /Worker status/);
+});
+
+test("job names must be unique across previous jobs", () => {
+  const jobs = [
+    { id: "JOB-1", name: "Smith Street" },
+    { id: "JOB-2", name: "Old Site", deletedAt: "2026-01-01T00:00:00.000Z" },
+  ];
+  assert.throws(
+    () => assertJobNameAvailable("smith street", jobs),
+    /already exists/,
+  );
+  assert.throws(
+    () => assertJobNameAvailable("Old Site", jobs),
+    /already exists/,
+  );
+  assert.doesNotThrow(() =>
+    assertJobNameAvailable("Smith Street", jobs, { excludeId: "JOB-1" }));
+  assert.doesNotThrow(() => assertJobNameAvailable("New Site", jobs));
 });
 
 test("document contracts normalize cents and enforce date order", () => {

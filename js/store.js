@@ -22,7 +22,9 @@ import {
   validateConversionCommand, validateDocument, validateDocumentStateCommand,
   validateInvoiceStatusCommand, validateQuoteStatusCommand, validateStatusTransition,
 } from "./domain/documents.js";
-import { validateJob, validateJobDeleteCommand } from "./domain/jobs.js";
+import {
+  assertJobNameAvailable, validateJob, validateJobDeleteCommand,
+} from "./domain/jobs.js";
 import { hoursFromHundredths } from "./domain/hours.js";
 import { dollarsFromCents } from "./domain/money.js";
 import { validateTimesheet, validateTimesheetDeleteCommand } from "./domain/timesheets.js";
@@ -198,6 +200,11 @@ export async function saveJob(input) {
   });
 
   const rows = await readRows(ctx.timesheetsSheetId, JOBS_TAB);
+  assertJobNameAvailable(
+    job.name,
+    rowsToObjects(rows).map(jobFromRow),
+    { excludeId: job.id },
+  );
   const idx = rows.findIndex((row, i) => i > 0 && row[0] === job.id);
   const headers = rows[0] || [];
   let legacyWorkerIds = idx >= 0 ? (rows[idx][12] || "[]") : "[]";

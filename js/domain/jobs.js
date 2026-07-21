@@ -1,8 +1,29 @@
 import {
+  DomainError,
   identifier, oneOf, optionalInstant, optionalText, requiredText,
 } from "./validation.js";
 
 export const JOB_STATUSES = Object.freeze(["Active", "Complete", "Archived"]);
+
+export function normalizeJobNameKey(name) {
+  return String(name ?? "").trim().toLowerCase();
+}
+
+/** Rejects reuse of a job name across active, archived, and soft-deleted jobs. */
+export function assertJobNameAvailable(name, jobs, { excludeId = "" } = {}) {
+  const key = normalizeJobNameKey(name);
+  if (!key) return;
+  const conflict = (jobs || []).find((job) =>
+    job?.id
+    && job.id !== excludeId
+    && normalizeJobNameKey(job.name) === key);
+  if (conflict) {
+    throw new DomainError(
+      `A job named “${String(name).trim()}” already exists.`,
+      "name",
+    );
+  }
+}
 
 export function validateJob(input) {
   const client = input?.client || {};
